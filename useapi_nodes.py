@@ -119,11 +119,20 @@ def _check_status(status: int, body: bytes, url: str, context: str = "") -> dict
     if status == 403:
         _err_obj = data.get("error") if isinstance(data.get("error"), dict) else {}
         msg = data.get("message", "") or _err_obj.get("message", "")
-        if "reCAPTCHA" in msg or "captcha" in msg.lower():
+        raw_text = body[:500].decode(errors="replace") if body else ""
+        if "reCAPTCHA" in (msg + raw_text) or "captcha" in (msg + raw_text).lower():
             raise RuntimeError(
                 f"{LOG} {label}Transient reCAPTCHA error (403) — this is an intermittent "
                 "Google-side rate limit, not a configuration issue. Retry in a few seconds. "
                 f"URL: {url}\nDetail: {detail}"
+            )
+        if detail == "API error: 403":
+            raise RuntimeError(
+                f"{LOG} {label}Google returned 403 to Useapi.net (\"API error: 403\"). "
+                "This is usually a transient Google-side block — retry in a few seconds. "
+                "If it persists, verify that your Google/service account has access to this "
+                "model at useapi.net (Settings > Accounts). "
+                f"URL: {url}\nRaw response: {raw_text[:300]}"
             )
         raise RuntimeError(
             f"{LOG} {label}Forbidden (403). The Google/service account linked to your "
