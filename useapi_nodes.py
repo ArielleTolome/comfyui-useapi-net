@@ -213,7 +213,9 @@ def _runway_upload_image(token: str, image_tensor: torch.Tensor,
     """Upload a ComfyUI IMAGE tensor to Runway as an image asset. Returns assetId."""
     url = f"{BASE_URL}/runwayml/assets"
     png_bytes = _tensor_to_png_bytes(image_tensor)
-    fields = {"email": email.strip()} if email.strip() else {}
+    fields = {"name": "comfyui_upload"}
+    if email.strip():
+        fields["email"] = email.strip()
     files = {"file": ("comfyui_upload.png", png_bytes, "image/png")}
     body, ct = _build_multipart(fields, files)
     headers = {"Authorization": f"Bearer {token}", "Content-Type": ct}
