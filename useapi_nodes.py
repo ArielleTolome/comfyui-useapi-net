@@ -11,6 +11,7 @@ import time
 import uuid
 import base64
 import hashlib
+import shutil
 import tempfile
 import threading
 import urllib.request
@@ -1148,16 +1149,35 @@ class UseapiPreviewVideo:
 
     def execute(self, video_url: str, video_path: str):
         lines = [f"URL: {video_url}"]
-        if video_path:
-            exists = os.path.exists(video_path)
+        ui_videos = []
+
+        if video_path and os.path.exists(video_path):
+            size_mb = os.path.getsize(video_path) / (1024 * 1024)
             lines.append(f"Path: {video_path}")
-            lines.append(f"Exists: {exists}")
-            if exists:
-                size_mb = os.path.getsize(video_path) / (1024 * 1024)
-                lines.append(f"Size: {size_mb:.2f} MB")
+            lines.append(f"Size: {size_mb:.2f} MB")
+
+            # Copy to ComfyUI output folder so the UI can display it
+            try:
+                import folder_paths
+                output_dir = folder_paths.get_output_directory()
+                filename = f"useapi_{os.path.basename(video_path)}"
+                dest = os.path.join(output_dir, filename)
+                shutil.copy2(video_path, dest)
+                ui_videos.append({
+                    "filename": filename,
+                    "subfolder": "",
+                    "type": "output",
+                    "format": "video/mp4",
+                })
+                lines.append(f"Output: {dest}")
+            except Exception as e:
+                lines.append(f"Preview copy failed: {e}")
+        elif video_path:
+            lines.append(f"Path: {video_path} (not found)")
+
         info = "\n".join(lines)
         print(f"{LOG} Preview Video:\n{info}")
-        return (info,)
+        return {"ui": {"video": ui_videos}, "result": (info,)}
 
 
 # ── Node 15: Veo Video to GIF ────────────────────────────────────────────────
