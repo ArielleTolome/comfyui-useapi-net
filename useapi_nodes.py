@@ -238,9 +238,75 @@ class UseapiTokenFromEnv:
         return (token,)
 
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
+# ── Node 2: Veo Generate Video ────────────────────────────────────────────────
+class UseapiVeoGenerate:
+    """Generate video using Google Veo 3.1 via Google Flow.
+
+    Server-side auto-poll: blocks until complete (~60-180s). Timeout: 600s.
+    Outputs: video_url, local video_path, media_generation_id (for upscale/extend).
+    """
+
+    CATEGORY = "Useapi.net/Google Flow"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "media_generation_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model": (["veo-3.1-fast", "veo-3.1-quality", "veo-3.1-fast-relaxed", "veo-3", "veo-2"],),
+                "aspect_ratio": (["landscape", "portrait"],),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "count": ("INT", {"default": 1, "min": 1, "max": 4}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+            },
+        }
+
+    def execute(self, prompt: str, model: str, aspect_ratio: str,
+                api_token: str = "", email: str = "",
+                count: int = 1, seed: int = 0):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/google-flow/videos"
+        body = {"prompt": prompt, "model": model, "aspectRatio": aspect_ratio, "count": count}
+        if seed != 0:
+            body["seed"] = seed
+        if email.strip():
+            body["email"] = email.strip()
+
+        print(f"{LOG} Veo Generate: model={model}, prompt='{prompt[:60]}...'")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=600)
+        data = _check_status(status, raw, url, "Veo generate")
+
+        ops = data.get("operations", [])
+        if not ops:
+            raise RuntimeError(f"{LOG} Veo generate returned no operations: {data}")
+        op = ops[0]
+        op_status = op.get("status", "")
+        if "FAIL" in op_status.upper():
+            raise RuntimeError(f"{LOG} Veo generation failed. Status={op_status}. op={op}")
+        video_meta = op.get("operation", {}).get("metadata", {}).get("video", {})
+        video_url = video_meta.get("fifeUrl", "")
+        media_gen_id = video_meta.get("mediaGenerationId", "")
+        if not video_url:
+            raise RuntimeError(f"{LOG} Veo generate: no fifeUrl in response. video_meta={video_meta}")
+
+        print(f"{LOG} Veo Generate: complete. mediaGenerationId={media_gen_id[:50]}...")
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, media_gen_id)
+
+
+# ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv": UseapiTokenFromEnv,
+    "UseapiVeoGenerate":  UseapiVeoGenerate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv": "Useapi Token From Env",
+    "UseapiVeoGenerate":  "Useapi Veo 3.1 Generate Video",
 }
