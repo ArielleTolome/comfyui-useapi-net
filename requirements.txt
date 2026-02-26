@@ -1,0 +1,5 @@
+# Core deps (numpy, Pillow, torch) are provided by ComfyUI — do NOT reinstall.
+# No mandatory additional dependencies.
+
+# Optional: enables UseapiLoadVideoFrame node
+# pip install opencv-python
