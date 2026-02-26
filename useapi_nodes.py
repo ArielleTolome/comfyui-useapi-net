@@ -36,6 +36,8 @@ _RUNWAY_STYLES = [
     "dark-anime", "painted-anime", "3d-cartoon", "sketch", "low-angle",
     "in-motion", "terracotta",
 ]
+# Images endpoint does not accept "none" as a style value
+_RUNWAY_STYLES_IMAGES = [s for s in _RUNWAY_STYLES if s != "none"]
 
 # ── Shared Utilities ─────────────────────────────────────────────────────────
 
@@ -111,6 +113,19 @@ def _check_status(status: int, body: bytes, url: str, context: str = "") -> dict
     if status == 401:
         raise RuntimeError(
             f"{LOG} {label}Unauthorized (401). Check your Useapi.net token. URL: {url}"
+        )
+    if status == 403:
+        msg = data.get("message", "")
+        if "reCAPTCHA" in msg or "captcha" in msg.lower():
+            raise RuntimeError(
+                f"{LOG} {label}Transient reCAPTCHA error (403) — this is an intermittent "
+                "Google-side rate limit, not a configuration issue. Retry in a few seconds. "
+                f"URL: {url}\nDetail: {detail}"
+            )
+        raise RuntimeError(
+            f"{LOG} {label}Forbidden (403). The Google/service account linked to your "
+            f"Useapi.net token may not have access to this API or model. "
+            f"Verify your account settings at useapi.net. URL: {url}\nDetail: {detail}"
         )
     raise RuntimeError(f"{LOG} {label}HTTP {status} from {url}.\nDetail: {detail}")
 
@@ -506,7 +521,18 @@ class UseapiGoogleFlowGenerateImage:
 
         print(f"{LOG} Google Flow Image: model={model}, count={count}, prompt='{prompt[:60]}'")
         headers = _auth_headers(token)
-        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=120)
+        for _attempt in range(3):
+            status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=120)
+            if status == 403 and _attempt < 2:
+                try:
+                    _resp = json.loads(raw) if raw else {}
+                    if "reCAPTCHA" in _resp.get("message", ""):
+                        print(f"{LOG} Google Flow Image: reCAPTCHA 403, retrying ({_attempt + 1}/3)...")
+                        time.sleep(8)
+                        continue
+                except Exception:
+                    pass
+            break
         data = _check_status(status, raw, url, "Google Flow generate image")
 
         media_list = data.get("media", [])
@@ -1186,7 +1212,7 @@ class UseapiRunwayImages:
                 "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
                 "resolution": (["720p", "1080p", "1K", "2K", "4K"],),
                 "num_images": (["1", "4"],),
-                "style": (_RUNWAY_STYLES,),
+                "style": (_RUNWAY_STYLES_IMAGES,),
                 "diversity": ("INT", {"default": 2, "min": 1, "max": 5}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
                 "image_asset_id_1": ("STRING", {"default": ""}),
@@ -1200,7 +1226,7 @@ class UseapiRunwayImages:
     def execute(self, model: str, text_prompt: str,
                 api_token: str = "", email: str = "",
                 aspect_ratio: str = "16:9", resolution: str = "1080p",
-                num_images: str = "1", style: str = "none",
+                num_images: str = "1", style: str = "vivid",
                 diversity: int = 2, seed: int = 0,
                 image_asset_id_1: str = "", image_asset_id_2: str = "",
                 image_asset_id_3: str = "",
@@ -1213,9 +1239,10 @@ class UseapiRunwayImages:
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
             "num_images": int(num_images),
-            "style": style,
             "diversity": diversity,
         }
+        if style and style != "none":
+            body["style"] = style
         if seed != 0:
             body["seed"] = seed
         if email.strip():
