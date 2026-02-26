@@ -210,6 +210,37 @@ def _runway_upload_image(token: str, image_tensor: torch.Tensor,
 
 # ── Node classes added in Tasks 3-16 ─────────────────────────────────────────
 
+# ── Node 1: Useapi Token From Env ─────────────────────────────────────────────
+class UseapiTokenFromEnv:
+    """Load Useapi.net API token from an environment variable."""
+
+    CATEGORY = "Useapi.net/Utils"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("api_token",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "env_var_name": ("STRING", {"default": "USEAPI_TOKEN"}),
+            }
+        }
+
+    def execute(self, env_var_name: str):
+        token = os.environ.get(env_var_name, "").strip()
+        if not token:
+            raise ValueError(
+                f"{LOG} Environment variable '{env_var_name}' is not set or empty. "
+                "Export it before launching ComfyUI."
+            )
+        print(f"{LOG} Token loaded from env var '{env_var_name}'")
+        return (token,)
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
+NODE_CLASS_MAPPINGS = {
+    "UseapiTokenFromEnv": UseapiTokenFromEnv,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "UseapiTokenFromEnv": "Useapi Token From Env",
+}
