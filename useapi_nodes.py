@@ -607,6 +607,87 @@ class UseapiRunwayUploadAsset:
         return (asset_id,)
 
 
+# ── Node 9: Runway Generate Video ────────────────────────────────────────────
+class UseapiRunwayGenerate:
+    """Generate video using Runway Gen-4, Gen-4 Turbo, or Gen-3 Turbo.
+
+    Async: creates a task, polls until SUCCEEDED.
+    If image input provided without asset_id, auto-uploads the image first.
+    Gen-4/Gen-4 Turbo require firstImage_assetId. Gen-3 Turbo supports text-to-video.
+    """
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": (["gen4", "gen4turbo", "gen3turbo"],),
+                "text_prompt": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "image": ("IMAGE",),
+                "asset_id": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
+                "seconds": (["5", "10"],),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 600, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, model: str, text_prompt: str,
+                api_token: str = "", image=None, asset_id: str = "",
+                email: str = "", aspect_ratio: str = "16:9",
+                seconds: str = "10", seed: int = 0,
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 600):
+        token = _get_token(api_token)
+
+        # Auto-upload image if provided without asset_id
+        final_asset_id = asset_id.strip()
+        if image is not None and not final_asset_id:
+            print(f"{LOG} Runway Generate: auto-uploading image...")
+            final_asset_id = _runway_upload_image(token, image, email)
+
+        url = f"{BASE_URL}/runwayml/{model}/create"
+        body = {
+            "text_prompt": text_prompt,
+            "aspect_ratio": aspect_ratio,
+            "seconds": int(seconds),
+            "exploreMode": explore_mode,
+            "maxJobs": max_jobs,
+        }
+        if final_asset_id:
+            body["firstImage_assetId"] = final_asset_id
+        if seed != 0:
+            body["seed"] = seed
+        if email.strip():
+            body["email"] = email.strip()
+
+        print(f"{LOG} Runway Generate: model={model}, {seconds}s, prompt='{text_prompt[:60]}'")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, f"Runway {model} create")
+
+        task_id = data.get("task", {}).get("taskId", "")
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway create: no taskId in response: {data}")
+        print(f"{LOG} Runway Generate: task created. taskId={task_id[:50]}...")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv":             UseapiTokenFromEnv,
@@ -617,6 +698,7 @@ NODE_CLASS_MAPPINGS = {
     "UseapiGoogleFlowUploadAsset":    UseapiGoogleFlowUploadAsset,
     "UseapiGoogleFlowImageUpscale":   UseapiGoogleFlowImageUpscale,
     "UseapiRunwayUploadAsset":        UseapiRunwayUploadAsset,
+    "UseapiRunwayGenerate":           UseapiRunwayGenerate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv":             "Useapi Token From Env",
@@ -627,4 +709,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiGoogleFlowUploadAsset":    "Useapi Google Flow Upload Asset",
     "UseapiGoogleFlowImageUpscale":   "Useapi Google Flow Image Upscale",
     "UseapiRunwayUploadAsset":        "Useapi Runway Upload Asset",
+    "UseapiRunwayGenerate":           "Useapi Runway Generate Video",
 }
