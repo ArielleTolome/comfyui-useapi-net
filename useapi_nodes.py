@@ -688,6 +688,70 @@ class UseapiRunwayGenerate:
         return (video_url, video_path, task_id)
 
 
+# ── Node 10: Runway Video-to-Video ────────────────────────────────────────────
+class UseapiRunwayVideoToVideo:
+    """Transform or extend an existing video using Runway Gen-4 or Gen-3 Turbo.
+
+    Requires a video assetId (upload a video file to Runway first via the API).
+    """
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_asset_id": ("STRING", {"default": ""}),
+                "model": (["gen4", "gen3turbo"],),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "text_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "seconds": (["5", "10"],),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 600, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, video_asset_id: str, model: str,
+                api_token: str = "", text_prompt: str = "",
+                seconds: str = "10", seed: int = 0,
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 600):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/{model}/video"
+        body = {
+            "assetId": video_asset_id,
+            "seconds": int(seconds),
+            "exploreMode": explore_mode,
+            "maxJobs": max_jobs,
+        }
+        if text_prompt.strip():
+            body["text_prompt"] = text_prompt.strip()
+        if seed != 0:
+            body["seed"] = seed
+
+        print(f"{LOG} Runway Video-to-Video: model={model}, assetId={video_asset_id[:50]}...")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, f"Runway {model} video-to-video create")
+
+        task_id = data.get("task", {}).get("taskId", "")
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway video-to-video: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv":             UseapiTokenFromEnv,
@@ -699,6 +763,7 @@ NODE_CLASS_MAPPINGS = {
     "UseapiGoogleFlowImageUpscale":   UseapiGoogleFlowImageUpscale,
     "UseapiRunwayUploadAsset":        UseapiRunwayUploadAsset,
     "UseapiRunwayGenerate":           UseapiRunwayGenerate,
+    "UseapiRunwayVideoToVideo":       UseapiRunwayVideoToVideo,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv":             "Useapi Token From Env",
@@ -710,4 +775,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiGoogleFlowImageUpscale":   "Useapi Google Flow Image Upscale",
     "UseapiRunwayUploadAsset":        "Useapi Runway Upload Asset",
     "UseapiRunwayGenerate":           "Useapi Runway Generate Video",
+    "UseapiRunwayVideoToVideo":       "Useapi Runway Video-to-Video",
 }
