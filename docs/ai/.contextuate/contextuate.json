@@ -3,8 +3,8 @@
   "version": "2.1.2",
   "description": "**Standardized AI Context for Software Projects**",
   "repository": "https://github.com/esotech/contextuate",
-  "initialized": "2026-02-26T03:25:03.322Z",
-  "updated": "2026-02-26T03:25:03.322Z",
+  "initialized": "2026-02-26T08:55:15.081Z",
+  "updated": "2026-02-26T08:55:26.853Z",
   "tools": {
     "ripgrep": {
       "installed": true,
