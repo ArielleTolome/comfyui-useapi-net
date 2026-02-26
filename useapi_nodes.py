@@ -842,8 +842,7 @@ class UseapiRunwayFramesGenerate:
             raise RuntimeError(f"{LOG} Runway Frames: no taskId in response: {data}")
         print(f"{LOG} Runway Frames: task created. taskId={task_id[:50]}...")
 
-        artifacts = _runway_poll(task_id, token, poll_interval, max_wait,
-                                 poll_path="runwayml/frames/tasks")
+        artifacts = _runway_frames_poll(task_id, token, poll_interval, max_wait)
         all_urls = [a["url"] for a in artifacts if a.get("mediaType") == "image" or "url" in a]
         if not all_urls:
             raise RuntimeError(f"{LOG} Runway Frames: no image URLs in artifacts: {artifacts}")
