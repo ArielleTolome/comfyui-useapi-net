@@ -29,6 +29,13 @@ except ImportError:
 LOG = "[Useapi.net]"
 BASE_URL = "https://api.useapi.net/v1"
 VIDEO_CACHE_DIR = os.path.join(tempfile.gettempdir(), "comfyui_useapi_videos")
+_RUNWAY_STYLES = [
+    "none", "vivid", "vivid-warm", "vivid-cool", "high-contrast",
+    "high-contrast-warm", "high-contrast-cool", "bw", "bw-contrast",
+    "muted-pastel", "dreamscape", "nordic-minimal", "light-anime",
+    "dark-anime", "painted-anime", "3d-cartoon", "sketch", "low-angle",
+    "in-motion", "terracotta",
+]
 
 # ── Shared Utilities ─────────────────────────────────────────────────────────
 
@@ -170,6 +177,17 @@ def _download_file(url: str, ext: str = ".mp4") -> str:
     return dest
 
 
+def _save_bytes_to_cache(data: bytes, ext: str) -> str:
+    """Save raw bytes to VIDEO_CACHE_DIR with MD5-hash filename. Returns local path."""
+    os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
+    fname = hashlib.md5(data).hexdigest() + ext
+    dest = os.path.join(VIDEO_CACHE_DIR, fname)
+    with open(dest, "wb") as f:
+        f.write(data)
+    print(f"{LOG} Saved {len(data):,} bytes → {dest}")
+    return dest
+
+
 def _runway_poll(task_id: str, token: str,
                  poll_interval: int = 10, max_wait: int = 600,
                  poll_path: str = "runwayml/tasks") -> list:
@@ -209,24 +227,27 @@ def _runway_frames_poll(task_id: str, token: str,
 
 
 def _runway_upload_image(token: str, image_tensor: torch.Tensor,
-                         email: str = "") -> str:
-    """Upload a ComfyUI IMAGE tensor to Runway as an image asset. Returns assetId."""
-    url = f"{BASE_URL}/runwayml/assets"
+                         email: str = "", name: str = "comfyui_upload") -> str:
+    """Upload a ComfyUI IMAGE tensor to Runway as a raw-binary image asset. Returns assetId."""
     png_bytes = _tensor_to_png_bytes(image_tensor)
-    fields = {"name": "comfyui_upload"}
+    params = {"name": name}
     if email.strip():
-        fields["email"] = email.strip()
-    files = {"file": ("comfyui_upload.png", png_bytes, "image/png")}
-    body, ct = _build_multipart(fields, files)
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": ct}
+        params["email"] = email.strip()
+    url = f"{BASE_URL}/runwayml/assets?{urllib.parse.urlencode(params)}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "image/png"}
     print(f"{LOG} Runway: uploading image asset...")
-    status, raw = _make_request(url, "POST", headers, body, timeout=60)
+    status, raw = _make_request(url, "POST", headers, png_bytes, timeout=60)
     data = _check_status(status, raw, url, "Runway upload asset")
-    asset_id = data.get("assetId", "")
+    asset_id = data.get("assetId", "") or data.get("id", "")
     if not asset_id:
         raise RuntimeError(f"{LOG} Runway upload: no assetId in response: {data}")
     print(f"{LOG} Runway asset uploaded: {asset_id[:50]}...")
     return asset_id
+
+
+def _extract_runway_task_id(data: dict) -> str:
+    """Extract taskId from either task.taskId (wrapped) or top-level taskId."""
+    return data.get("task", {}).get("taskId", "") or data.get("taskId", "")
 
 # ── Node classes added in Tasks 3-16 ─────────────────────────────────────────
 
@@ -268,6 +289,7 @@ class UseapiVeoGenerate:
 
     CATEGORY = "Useapi.net/Google Flow"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("video_url", "video_path", "media_generation_id")
 
@@ -284,19 +306,34 @@ class UseapiVeoGenerate:
                 "email": ("STRING", {"default": ""}),
                 "count": ("INT", {"default": 1, "min": 1, "max": 4}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+                "start_image": ("STRING", {"default": ""}),
+                "end_image": ("STRING", {"default": ""}),
+                "reference_image_1": ("STRING", {"default": ""}),
+                "reference_image_2": ("STRING", {"default": ""}),
+                "reference_image_3": ("STRING", {"default": ""}),
             },
         }
 
     def execute(self, prompt: str, model: str, aspect_ratio: str,
-                api_token: str = "", email: str = "",
-                count: int = 1, seed: int = 0):
+                api_token: str = "", email: str = "", count: int = 1,
+                seed: int = 0, start_image: str = "", end_image: str = "",
+                reference_image_1: str = "", reference_image_2: str = "",
+                reference_image_3: str = ""):
         token = _get_token(api_token)
         url = f"{BASE_URL}/google-flow/videos"
-        body = {"prompt": prompt, "model": model, "aspectRatio": aspect_ratio, "count": count}
+        body = {"prompt": prompt, "model": model, "aspectRatio": aspect_ratio,
+                "count": count}
         if seed != 0:
             body["seed"] = seed & 0x7FFFFFFF
         if email.strip():
             body["email"] = email.strip()
+        if start_image.strip():
+            body["startImage"] = start_image.strip()
+        if end_image.strip():
+            body["endImage"] = end_image.strip()
+        for i, ref in enumerate([reference_image_1, reference_image_2, reference_image_3], 1):
+            if ref.strip():
+                body[f"referenceImage_{i}"] = ref.strip()
 
         print(f"{LOG} Veo Generate: model={model}, prompt='{prompt[:60]}...'")
         headers = _auth_headers(token)
@@ -327,6 +364,7 @@ class UseapiVeoUpscale:
 
     CATEGORY = "Useapi.net/Google Flow"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("video_url", "video_path")
 
@@ -368,6 +406,7 @@ class UseapiVeoExtend:
 
     CATEGORY = "Useapi.net/Google Flow"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("video_url", "video_path", "media_generation_id")
 
@@ -380,13 +419,20 @@ class UseapiVeoExtend:
             },
             "optional": {
                 "api_token": ("STRING", {"default": ""}),
+                "model": (["veo-3.1-fast", "veo-3.1-quality", "veo-3.1-fast-relaxed"],),
+                "count": ("INT", {"default": 1, "min": 1, "max": 4}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
             },
         }
 
-    def execute(self, media_generation_id: str, prompt: str, api_token: str = ""):
+    def execute(self, media_generation_id: str, prompt: str, api_token: str = "",
+                model: str = "veo-3.1-fast", count: int = 1, seed: int = 0):
         token = _get_token(api_token)
         url = f"{BASE_URL}/google-flow/videos/extend"
-        body = {"mediaGenerationId": media_generation_id, "prompt": prompt}
+        body = {"mediaGenerationId": media_generation_id, "prompt": prompt,
+                "model": model, "count": count}
+        if seed != 0:
+            body["seed"] = seed & 0x7FFFFFFF
         print(f"{LOG} Veo Extend: mediaGenerationId={media_generation_id[:50]}...")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=600)
@@ -415,6 +461,7 @@ class UseapiGoogleFlowGenerateImage:
 
     CATEGORY = "Useapi.net/Google Flow"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("image", "image_url", "media_generation_id", "all_urls")
 
@@ -524,23 +571,18 @@ class UseapiGoogleFlowUploadAsset:
 
         url = f"{BASE_URL}/google-flow/assets/{urllib.parse.quote(email_clean, safe='')}"
         png_bytes = _tensor_to_png_bytes(image)
-        files = {"image": ("upload.png", png_bytes, "image/png")}
-        body, ct = _build_multipart({}, files)
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": ct}
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "image/png"}
 
         print(f"{LOG} Google Flow Upload Asset: uploading for {email_clean}...")
-        status, raw = _make_request(url, "POST", headers, body, timeout=60)
+        status, raw = _make_request(url, "POST", headers, png_bytes, timeout=60)
         data = _check_status(status, raw, url, "Google Flow upload asset")
 
-        # mediaGenerationId may be at root or nested under media[0].image.generatedImage
-        media_gen_id = data.get("mediaGenerationId", "")
-        if not media_gen_id:
-            media_gen_id = (
-                data.get("media", [{}])[0]
-                .get("image", {})
-                .get("generatedImage", {})
-                .get("mediaGenerationId", "")
-            )
+        # Response: {"mediaGenerationId": {"mediaGenerationId": "user:..."}, ...}
+        nested = data.get("mediaGenerationId", "")
+        if isinstance(nested, dict):
+            media_gen_id = nested.get("mediaGenerationId", "")
+        else:
+            media_gen_id = nested
         if not media_gen_id:
             raise RuntimeError(
                 f"{LOG} Google Flow Upload Asset: no mediaGenerationId in response: {data}"
@@ -559,6 +601,7 @@ class UseapiGoogleFlowImageUpscale:
 
     CATEGORY = "Useapi.net/Google Flow"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "media_generation_id")
 
@@ -638,6 +681,7 @@ class UseapiRunwayGenerate:
 
     CATEGORY = "Useapi.net/Runway"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("video_url", "video_path", "task_id")
 
@@ -645,7 +689,7 @@ class UseapiRunwayGenerate:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (["gen4", "gen4turbo", "gen3turbo"],),
+                "model": (["gen4_5", "gen4", "gen4turbo", "gen3turbo"],),
                 "text_prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
@@ -654,7 +698,7 @@ class UseapiRunwayGenerate:
                 "asset_id": ("STRING", {"default": ""}),
                 "email": ("STRING", {"default": ""}),
                 "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
-                "seconds": (["5", "10"],),
+                "seconds": (["5", "8", "10"],),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
                 "explore_mode": ("BOOLEAN", {"default": True}),
                 "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
@@ -717,6 +761,7 @@ class UseapiRunwayVideoToVideo:
 
     CATEGORY = "Useapi.net/Runway"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("video_url", "video_path", "task_id")
 
@@ -746,14 +791,15 @@ class UseapiRunwayVideoToVideo:
                 poll_interval: int = 10, max_wait: int = 600):
         token = _get_token(api_token)
         url = f"{BASE_URL}/runwayml/{model}/video"
+        # gen4 uses video_assetId; gen3turbo uses assetId
+        asset_key = "video_assetId" if model == "gen4" else "assetId"
         body = {
-            "assetId": video_asset_id,
+            asset_key: video_asset_id,
+            "text_prompt": text_prompt,
             "seconds": int(seconds),
             "exploreMode": explore_mode,
             "maxJobs": max_jobs,
         }
-        if text_prompt.strip():
-            body["text_prompt"] = text_prompt.strip()
         if seed != 0:
             body["seed"] = seed
 
@@ -762,7 +808,7 @@ class UseapiRunwayVideoToVideo:
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
         data = _check_status(status, raw, url, f"Runway {model} video-to-video create")
 
-        task_id = data.get("task", {}).get("taskId", "")
+        task_id = _extract_runway_task_id(data)
         if not task_id:
             raise RuntimeError(f"{LOG} Runway video-to-video: no taskId in response: {data}")
 
@@ -783,6 +829,7 @@ class UseapiRunwayFramesGenerate:
 
     CATEGORY = "Useapi.net/Runway"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("image", "image_url", "all_urls", "task_id")
 
@@ -874,6 +921,7 @@ class UseapiRunwayImageUpscaler:
 
     CATEGORY = "Useapi.net/Runway"
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
 
@@ -1000,6 +1048,587 @@ class UseapiPreviewVideo:
         return (info,)
 
 
+# ── Node 15: Veo Video to GIF ────────────────────────────────────────────────
+class UseapiVeoVideoToGif:
+    """Convert a Veo-generated video to an animated GIF via Google Flow."""
+
+    CATEGORY = "Useapi.net/Google Flow"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("gif_path",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "media_generation_id": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+            },
+        }
+
+    def execute(self, media_generation_id: str, api_token: str = ""):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/google-flow/videos/gif"
+        body = {"mediaGenerationId": media_generation_id}
+        print(f"{LOG} Veo Video to GIF: mediaGenerationId={media_generation_id[:50]}...")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=300)
+        data = _check_status(status, raw, url, "Veo video to GIF")
+        encoded = data.get("encodedGif", "")
+        if not encoded:
+            raise RuntimeError(f"{LOG} Veo Video to GIF: no encodedGif in response: {data}")
+        gif_bytes = base64.b64decode(encoded)
+        gif_path = _save_bytes_to_cache(gif_bytes, ".gif")
+        print(f"{LOG} Veo Video to GIF: complete. Path={gif_path}")
+        return (gif_path,)
+
+
+# ── Node 16: Veo Concatenate Videos ──────────────────────────────────────────
+class UseapiVeoConcatenate:
+    """Concatenate 2-5 Veo videos with optional per-clip trim controls."""
+
+    CATEGORY = "Useapi.net/Google Flow"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("video_path",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "media_1": ("STRING", {"default": ""}),
+                "media_2": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "media_3": ("STRING", {"default": ""}),
+                "media_4": ("STRING", {"default": ""}),
+                "media_5": ("STRING", {"default": ""}),
+                "trim_start_1": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_end_1":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_start_2": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_end_2":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_start_3": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_end_3":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_start_4": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_end_4":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_start_5": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "trim_end_5":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0}),
+                "api_token": ("STRING", {"default": ""}),
+            },
+        }
+
+    def execute(self, media_1: str, media_2: str,
+                media_3: str = "", media_4: str = "", media_5: str = "",
+                trim_start_1: float = 0.0, trim_end_1: float = 0.0,
+                trim_start_2: float = 0.0, trim_end_2: float = 0.0,
+                trim_start_3: float = 0.0, trim_end_3: float = 0.0,
+                trim_start_4: float = 0.0, trim_end_4: float = 0.0,
+                trim_start_5: float = 0.0, trim_end_5: float = 0.0,
+                api_token: str = ""):
+        token = _get_token(api_token)
+        ids = [media_1, media_2, media_3, media_4, media_5]
+        trims = [
+            (trim_start_1, trim_end_1),
+            (trim_start_2, trim_end_2),
+            (trim_start_3, trim_end_3),
+            (trim_start_4, trim_end_4),
+            (trim_start_5, trim_end_5),
+        ]
+        media_list = []
+        for mgid, (ts, te) in zip(ids, trims):
+            if mgid.strip():
+                media_list.append({
+                    "mediaGenerationId": mgid.strip(),
+                    "trimStart": ts,
+                    "trimEnd": te,
+                })
+        if len(media_list) < 2:
+            raise ValueError(f"{LOG} Veo Concatenate: at least 2 mediaGenerationIds required.")
+        url = f"{BASE_URL}/google-flow/videos/concatenate"
+        body = {"media": media_list}
+        print(f"{LOG} Veo Concatenate: {len(media_list)} videos...")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=600)
+        data = _check_status(status, raw, url, "Veo concatenate")
+        encoded = data.get("encodedVideo", "")
+        if not encoded:
+            raise RuntimeError(f"{LOG} Veo Concatenate: no encodedVideo in response: {data}")
+        video_bytes = base64.b64decode(encoded)
+        video_path = _save_bytes_to_cache(video_bytes, ".mp4")
+        print(f"{LOG} Veo Concatenate: complete. Path={video_path}")
+        return (video_path,)
+
+
+# ── Node 17: Runway Generate Images ──────────────────────────────────────────
+class UseapiRunwayImages:
+    """Generate images using Runway nano-banana, nano-banana-pro, gen4, or gen4-turbo."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_url", "all_urls", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": (["nano-banana", "nano-banana-pro", "gen4", "gen4-turbo"],),
+                "text_prompt": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
+                "resolution": (["720p", "1080p", "1K", "2K", "4K"],),
+                "num_images": (["1", "4"],),
+                "style": (_RUNWAY_STYLES,),
+                "diversity": ("INT", {"default": 2, "min": 1, "max": 5}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+                "image_asset_id_1": ("STRING", {"default": ""}),
+                "image_asset_id_2": ("STRING", {"default": ""}),
+                "image_asset_id_3": ("STRING", {"default": ""}),
+                "poll_interval": ("INT", {"default": 5, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 120, "min": 30, "max": 600}),
+            },
+        }
+
+    def execute(self, model: str, text_prompt: str,
+                api_token: str = "", email: str = "",
+                aspect_ratio: str = "16:9", resolution: str = "1080p",
+                num_images: str = "1", style: str = "none",
+                diversity: int = 2, seed: int = 0,
+                image_asset_id_1: str = "", image_asset_id_2: str = "",
+                image_asset_id_3: str = "",
+                poll_interval: int = 5, max_wait: int = 120):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/images/create"
+        body = {
+            "model": model,
+            "text_prompt": text_prompt,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "num_images": int(num_images),
+            "style": style,
+            "diversity": diversity,
+        }
+        if seed != 0:
+            body["seed"] = seed
+        if email.strip():
+            body["email"] = email.strip()
+        for i, aid in enumerate([image_asset_id_1, image_asset_id_2, image_asset_id_3], 1):
+            if aid.strip():
+                body[f"imageAssetId{i}"] = aid.strip()
+
+        print(f"{LOG} Runway Images: model={model}, prompt='{text_prompt[:60]}'")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway images create")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Images: no taskId in response: {data}")
+        print(f"{LOG} Runway Images: task created. taskId={task_id[:50]}...")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        all_urls = [a["url"] for a in artifacts if "url" in a]
+        if not all_urls:
+            raise RuntimeError(f"{LOG} Runway Images: no URLs in artifacts: {artifacts}")
+
+        first_url = all_urls[0]
+        s2, img_bytes = _make_request(first_url, "GET", {}, None, 60)
+        if s2 != 200:
+            raise RuntimeError(f"{LOG} Runway Images: failed to download image (HTTP {s2})")
+        image_tensor = _bytes_to_tensor(img_bytes)
+        return (image_tensor, first_url, json.dumps(all_urls), task_id)
+
+
+# ── Node 18: Runway Gen4 Upscale ──────────────────────────────────────────────
+class UseapiRunwayGen4Upscale:
+    """Upscale a Runway Gen4 or Gen4 Turbo video asset to higher resolution."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "asset_id": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, asset_id: str, api_token: str = "", email: str = "",
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 300):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/gen4/upscale"
+        body = {"assetId": asset_id, "exploreMode": explore_mode, "maxJobs": max_jobs}
+        if email.strip():
+            body["email"] = email.strip()
+        print(f"{LOG} Runway Gen4 Upscale: assetId={asset_id[:50]}...")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway gen4 upscale")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Gen4 Upscale: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
+# ── Node 19: Runway Act Two ────────────────────────────────────────────────────
+class UseapiRunwayActTwo:
+    """Transfer motion from a driving video to a character using Runway Gen4 Act Two."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "driving_asset_id": ("STRING", {"default": ""}),
+                "character_asset_id": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
+                "body_control": ("BOOLEAN", {"default": True}),
+                "expression_intensity": ("INT", {"default": 3, "min": 1, "max": 5}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, driving_asset_id: str, character_asset_id: str,
+                api_token: str = "", email: str = "",
+                aspect_ratio: str = "16:9", body_control: bool = True,
+                expression_intensity: int = 3, seed: int = 0,
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 300):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/gen4/act-two"
+        body = {
+            "driving_assetId": driving_asset_id,
+            "character_assetId": character_asset_id,
+            "aspect_ratio": aspect_ratio,
+            "body_control": body_control,
+            "expression_intensity": expression_intensity,
+            "exploreMode": explore_mode,
+            "maxJobs": max_jobs,
+        }
+        if seed != 0:
+            body["seed"] = seed
+        if email.strip():
+            body["email"] = email.strip()
+        print(
+            f"{LOG} Runway Act Two: driving={driving_asset_id[:40]}..., "
+            f"character={character_asset_id[:40]}..."
+        )
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway act-two")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Act Two: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
+# ── Node 20: Runway Act Two Voice ─────────────────────────────────────────────
+class UseapiRunwayActTwoVoice:
+    """Add a voice to a Runway Gen4 Act Two video using a voice ID."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_asset_id": ("STRING", {"default": ""}),
+                "voice_id": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, video_asset_id: str, voice_id: str,
+                api_token: str = "", email: str = "",
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 300):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/gen4/act-two-voice"
+        body = {
+            "video_assetId": video_asset_id,
+            "voiceId": voice_id,
+            "exploreMode": explore_mode,
+            "maxJobs": max_jobs,
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        print(f"{LOG} Runway Act Two Voice: video={video_asset_id[:40]}..., voiceId={voice_id}")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway act-two-voice")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Act Two Voice: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
+# ── Node 21: Runway Lipsync ────────────────────────────────────────────────────
+class UseapiRunwayLipsync:
+    """Create a lipsync video using Runway with optional image, video, audio, or voice."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "image_asset_id": ("STRING", {"default": ""}),
+                "video_asset_id": ("STRING", {"default": ""}),
+                "audio_asset_id": ("STRING", {"default": ""}),
+                "voice_id": ("STRING", {"default": ""}),
+                "voice_text": ("STRING", {"default": ""}),
+                "model_id": (["eleven_multilingual_v1", "eleven_multilingual_v2"],),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, image_asset_id: str = "", video_asset_id: str = "",
+                audio_asset_id: str = "", voice_id: str = "", voice_text: str = "",
+                model_id: str = "eleven_multilingual_v2",
+                api_token: str = "", email: str = "",
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 300):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/lipsync/create"
+        body = {"exploreMode": explore_mode, "maxJobs": max_jobs, "model_id": model_id}
+        if image_asset_id.strip():
+            body["image_assetId"] = image_asset_id.strip()
+        if video_asset_id.strip():
+            body["video_assetId"] = video_asset_id.strip()
+        if audio_asset_id.strip():
+            body["audio_assetId"] = audio_asset_id.strip()
+        if voice_id.strip():
+            body["voiceId"] = voice_id.strip()
+        if voice_text.strip():
+            body["voice_text"] = voice_text.strip()
+        if email.strip():
+            body["email"] = email.strip()
+        print(f"{LOG} Runway Lipsync: model_id={model_id}...")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway lipsync")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Lipsync: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
+# ── Node 22: Runway Super Slow Motion ─────────────────────────────────────────
+class UseapiRunwaySuperSlowMotion:
+    """Create super slow-motion video from a Runway video asset."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "asset_id": ("STRING", {"default": ""}),
+                "speed": ("FLOAT", {"default": 0.5, "min": 0.1, "max": 1.0}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, asset_id: str, speed: float,
+                api_token: str = "", email: str = "",
+                max_jobs: int = 5, poll_interval: int = 10, max_wait: int = 300):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/super_slow_motion"
+        body = {"assetId": asset_id, "speed": speed, "maxJobs": max_jobs}
+        if email.strip():
+            body["email"] = email.strip()
+        print(f"{LOG} Runway Super Slow Motion: assetId={asset_id[:50]}..., speed={speed}")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway super slow motion")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Super Slow Motion: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
+# ── Node 23: Runway Transcribe ─────────────────────────────────────────────────
+class UseapiRunwayTranscribe:
+    """Transcribe a Runway video or audio asset to text. Synchronous — no polling."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("full_text", "words_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "asset_id": ("STRING", {"default": ""}),
+                "language": (["en", "en_us", "en_uk", "en_au", "es", "fr", "de", "it", "pt", "nl"],),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+            },
+        }
+
+    def execute(self, asset_id: str, language: str, api_token: str = ""):
+        token = _get_token(api_token)
+        params = {"assetId": asset_id, "language": language}
+        url = f"{BASE_URL}/runwayml/transcribe?{urllib.parse.urlencode(params)}"
+        print(f"{LOG} Runway Transcribe: assetId={asset_id[:50]}..., language={language}")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "GET", headers, None, timeout=120)
+        data = _check_status(status, raw, url, "Runway transcribe")
+        words = data.get("words", [])
+        full_text = " ".join(w.get("text", "") for w in words)
+        words_json = json.dumps(words)
+        print(f"{LOG} Runway Transcribe: {len(words)} words transcribed.")
+        return (full_text, words_json)
+
+
+# ── Node 24: Runway Gen3 Turbo Extend ─────────────────────────────────────────
+class UseapiRunwayGen3TurboExtend:
+    """Extend a Runway Gen3 Turbo video with an optional continuation prompt."""
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "asset_id": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "text_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
+                "poll_interval": ("INT", {"default": 10, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, asset_id: str, text_prompt: str = "", seed: int = 0,
+                api_token: str = "", email: str = "",
+                explore_mode: bool = True, max_jobs: int = 5,
+                poll_interval: int = 10, max_wait: int = 300):
+        token = _get_token(api_token)
+        url = f"{BASE_URL}/runwayml/gen3turbo/extend"
+        body = {"assetId": asset_id, "exploreMode": explore_mode, "maxJobs": max_jobs}
+        if text_prompt.strip():
+            body["text_prompt"] = text_prompt.strip()
+        if seed != 0:
+            body["seed"] = seed
+        if email.strip():
+            body["email"] = email.strip()
+        print(f"{LOG} Runway Gen3 Turbo Extend: assetId={asset_id[:50]}...")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway gen3turbo extend")
+
+        task_id = _extract_runway_task_id(data)
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Gen3 Turbo Extend: no taskId in response: {data}")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        video_url = artifacts[0]["url"]
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, task_id)
+
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv":             UseapiTokenFromEnv,
@@ -1016,6 +1645,16 @@ NODE_CLASS_MAPPINGS = {
     "UseapiRunwayImageUpscaler":      UseapiRunwayImageUpscaler,
     "UseapiLoadVideoFrame":           UseapiLoadVideoFrame,
     "UseapiPreviewVideo":             UseapiPreviewVideo,
+    "UseapiVeoVideoToGif":            UseapiVeoVideoToGif,
+    "UseapiVeoConcatenate":           UseapiVeoConcatenate,
+    "UseapiRunwayImages":             UseapiRunwayImages,
+    "UseapiRunwayGen4Upscale":        UseapiRunwayGen4Upscale,
+    "UseapiRunwayActTwo":             UseapiRunwayActTwo,
+    "UseapiRunwayActTwoVoice":        UseapiRunwayActTwoVoice,
+    "UseapiRunwayLipsync":            UseapiRunwayLipsync,
+    "UseapiRunwaySuperSlowMotion":    UseapiRunwaySuperSlowMotion,
+    "UseapiRunwayTranscribe":         UseapiRunwayTranscribe,
+    "UseapiRunwayGen3TurboExtend":    UseapiRunwayGen3TurboExtend,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv":             "Useapi Token From Env",
@@ -1032,4 +1671,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiRunwayImageUpscaler":      "Useapi Runway Image Upscaler",
     "UseapiLoadVideoFrame":           "Useapi Load Video Frame",
     "UseapiPreviewVideo":             "Useapi Preview Video",
+    "UseapiVeoVideoToGif":            "Useapi Veo Video to GIF",
+    "UseapiVeoConcatenate":           "Useapi Veo Concatenate Videos",
+    "UseapiRunwayImages":             "Useapi Runway Generate Images",
+    "UseapiRunwayGen4Upscale":        "Useapi Runway Gen4 Upscale Video",
+    "UseapiRunwayActTwo":             "Useapi Runway Act Two",
+    "UseapiRunwayActTwoVoice":        "Useapi Runway Act Two Voice",
+    "UseapiRunwayLipsync":            "Useapi Runway Lipsync",
+    "UseapiRunwaySuperSlowMotion":    "Useapi Runway Super Slow Motion",
+    "UseapiRunwayTranscribe":         "Useapi Runway Transcribe",
+    "UseapiRunwayGen3TurboExtend":    "Useapi Runway Gen3 Turbo Extend",
 }
