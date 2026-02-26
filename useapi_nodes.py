@@ -943,6 +943,42 @@ class UseapiLoadVideoFrame:
         return (tensor,)
 
 
+# ── Node 14: Preview Video ────────────────────────────────────────────────────
+class UseapiPreviewVideo:
+    """Display video URL and local path info as text.
+
+    ComfyUI doesn't natively preview video. Wire the STRING output to a
+    ShowText node or similar to display metadata during workflow development.
+    """
+
+    CATEGORY = "Useapi.net/Utils"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("info",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_url": ("STRING", {"default": ""}),
+                "video_path": ("STRING", {"default": ""}),
+            }
+        }
+
+    def execute(self, video_url: str, video_path: str):
+        lines = [f"URL: {video_url}"]
+        if video_path:
+            exists = os.path.exists(video_path)
+            lines.append(f"Path: {video_path}")
+            lines.append(f"Exists: {exists}")
+            if exists:
+                size_mb = os.path.getsize(video_path) / (1024 * 1024)
+                lines.append(f"Size: {size_mb:.2f} MB")
+        info = "\n".join(lines)
+        print(f"{LOG} Preview Video:\n{info}")
+        return (info,)
+
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv":             UseapiTokenFromEnv,
@@ -958,6 +994,7 @@ NODE_CLASS_MAPPINGS = {
     "UseapiRunwayFramesGenerate":     UseapiRunwayFramesGenerate,
     "UseapiRunwayImageUpscaler":      UseapiRunwayImageUpscaler,
     "UseapiLoadVideoFrame":           UseapiLoadVideoFrame,
+    "UseapiPreviewVideo":             UseapiPreviewVideo,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv":             "Useapi Token From Env",
@@ -973,4 +1010,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiRunwayFramesGenerate":     "Useapi Runway Frames Generate Image",
     "UseapiRunwayImageUpscaler":      "Useapi Runway Image Upscaler",
     "UseapiLoadVideoFrame":           "Useapi Load Video Frame",
+    "UseapiPreviewVideo":             "Useapi Preview Video",
 }
