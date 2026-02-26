@@ -752,6 +752,98 @@ class UseapiRunwayVideoToVideo:
         return (video_url, video_path, task_id)
 
 
+# ── Node 11: Runway Frames Generate Image ────────────────────────────────────
+class UseapiRunwayFramesGenerate:
+    """Generate high-quality images using Runway Frames (1080p, ~20-30s).
+
+    Supports up to 3 reference images (image_ref_1/2/3 auto-uploaded).
+    Reference images in prompt as @IMG_1, @IMG_2, @IMG_3.
+    Async: creates task, polls until SUCCEEDED.
+    """
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_url", "all_urls", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text_prompt": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
+                "style": ("STRING", {"default": ""}),
+                "diversity": ("INT", {"default": 2, "min": 0, "max": 5}),
+                "num_images": (["1", "4"],),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
+                "explore_mode": ("BOOLEAN", {"default": True}),
+                "image_ref_1": ("IMAGE",),
+                "image_ref_2": ("IMAGE",),
+                "image_ref_3": ("IMAGE",),
+                "poll_interval": ("INT", {"default": 5, "min": 5, "max": 60}),
+                "max_wait": ("INT", {"default": 120, "min": 60, "max": 600}),
+            },
+        }
+
+    def execute(self, text_prompt: str, api_token: str = "", email: str = "",
+                aspect_ratio: str = "16:9", style: str = "", diversity: int = 2,
+                num_images: str = "4", seed: int = 0, explore_mode: bool = True,
+                image_ref_1=None, image_ref_2=None, image_ref_3=None,
+                poll_interval: int = 5, max_wait: int = 120):
+        token = _get_token(api_token)
+
+        # Auto-upload reference images
+        asset_ids = []
+        for i, ref_img in enumerate([image_ref_1, image_ref_2, image_ref_3], start=1):
+            if ref_img is not None:
+                print(f"{LOG} Runway Frames: uploading image_ref_{i}...")
+                aid = _runway_upload_image(token, ref_img, email)
+                asset_ids.append((i, aid))
+
+        url = f"{BASE_URL}/runwayml/frames/create"
+        body = {
+            "text_prompt": text_prompt,
+            "aspect_ratio": aspect_ratio,
+            "diversity": diversity,
+            "num_images": int(num_images),
+            "exploreMode": explore_mode,
+        }
+        if style.strip():
+            body["style"] = style.strip()
+        if seed != 0:
+            body["seed"] = seed
+        if email.strip():
+            body["email"] = email.strip()
+        for i, aid in asset_ids:
+            body[f"imageAssetId{i}"] = aid
+
+        print(f"{LOG} Runway Frames: num_images={num_images}, prompt='{text_prompt[:60]}'")
+        headers = _auth_headers(token)
+        status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
+        data = _check_status(status, raw, url, "Runway Frames create")
+
+        task_id = data.get("taskId", "") or data.get("task", {}).get("taskId", "")
+        if not task_id:
+            raise RuntimeError(f"{LOG} Runway Frames: no taskId in response: {data}")
+        print(f"{LOG} Runway Frames: task created. taskId={task_id[:50]}...")
+
+        artifacts = _runway_poll(task_id, token, poll_interval, max_wait)
+        all_urls = [a["url"] for a in artifacts if a.get("mediaType") == "image" or "url" in a]
+        if not all_urls:
+            raise RuntimeError(f"{LOG} Runway Frames: no image URLs in artifacts: {artifacts}")
+
+        first_url = all_urls[0]
+        s2, img_bytes = _make_request(first_url, "GET", {}, None, 60)
+        if s2 != 200:
+            raise RuntimeError(f"{LOG} Runway Frames: failed to download image (HTTP {s2})")
+        image_tensor = _bytes_to_tensor(img_bytes)
+        return (image_tensor, first_url, json.dumps(all_urls), task_id)
+
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv":             UseapiTokenFromEnv,
@@ -764,6 +856,7 @@ NODE_CLASS_MAPPINGS = {
     "UseapiRunwayUploadAsset":        UseapiRunwayUploadAsset,
     "UseapiRunwayGenerate":           UseapiRunwayGenerate,
     "UseapiRunwayVideoToVideo":       UseapiRunwayVideoToVideo,
+    "UseapiRunwayFramesGenerate":     UseapiRunwayFramesGenerate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv":             "Useapi Token From Env",
@@ -776,4 +869,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiRunwayUploadAsset":        "Useapi Runway Upload Asset",
     "UseapiRunwayGenerate":           "Useapi Runway Generate Video",
     "UseapiRunwayVideoToVideo":       "Useapi Runway Video-to-Video",
+    "UseapiRunwayFramesGenerate":     "Useapi Runway Frames Generate Image",
 }
