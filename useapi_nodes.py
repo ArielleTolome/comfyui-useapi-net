@@ -115,7 +115,8 @@ def _check_status(status: int, body: bytes, url: str, context: str = "") -> dict
             f"{LOG} {label}Unauthorized (401). Check your Useapi.net token. URL: {url}"
         )
     if status == 403:
-        msg = data.get("message", "")
+        _err_obj = data.get("error") if isinstance(data.get("error"), dict) else {}
+        msg = data.get("message", "") or _err_obj.get("message", "")
         if "reCAPTCHA" in msg or "captcha" in msg.lower():
             raise RuntimeError(
                 f"{LOG} {label}Transient reCAPTCHA error (403) — this is an intermittent "
@@ -526,7 +527,9 @@ class UseapiGoogleFlowGenerateImage:
             if status == 403 and _attempt < 2:
                 try:
                     _resp = json.loads(raw) if raw else {}
-                    if "reCAPTCHA" in _resp.get("message", ""):
+                    _err = _resp.get("error") if isinstance(_resp.get("error"), dict) else {}
+                    _rmsg = _resp.get("message", "") or _err.get("message", "")
+                    if "reCAPTCHA" in _rmsg or "captcha" in _rmsg.lower():
                         print(f"{LOG} Google Flow Image: reCAPTCHA 403, retrying ({_attempt + 1}/3)...")
                         time.sleep(8)
                         continue
