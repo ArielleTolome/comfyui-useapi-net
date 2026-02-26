@@ -201,6 +201,31 @@ def _runway_poll(task_id: str, token: str,
     )
 
 
+def _runway_frames_poll(task_id: str, token: str,
+                        poll_interval: int = 5, max_wait: int = 120) -> list:
+    """Poll Runway Frames task via GET on the create endpoint. Returns artifacts."""
+    poll_url = (
+        f"{BASE_URL}/runwayml/frames/create"
+        f"?taskId={urllib.parse.quote(task_id, safe='')}"
+    )
+    headers = _auth_headers(token)
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        status, raw = _make_request(poll_url, "GET", headers, None, 30)
+        data = _check_status(status, raw, poll_url, f"Runway Frames poll {task_id[:30]}")
+        task_status = data.get("status", "")
+        print(f"{LOG} Runway Frames task {task_id[:30]}... → {task_status}")
+        if task_status == "SUCCEEDED":
+            artifacts = data.get("artifacts", [])
+            if not artifacts:
+                raise RuntimeError(f"{LOG} Runway Frames SUCCEEDED but no artifacts: {data}")
+            return artifacts
+        if task_status in ("FAILED", "CANCELLED", "THROTTLED"):
+            raise RuntimeError(f"{LOG} Runway Frames ended with '{task_status}'. task_id={task_id}")
+    raise RuntimeError(f"{LOG} Runway Frames timed out after {max_wait}s. task_id={task_id}")
+
+
 def _runway_upload_image(token: str, image_tensor: torch.Tensor,
                          email: str = "") -> str:
     """Upload a ComfyUI IMAGE tensor to Runway as an image asset. Returns assetId."""
