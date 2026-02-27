@@ -28,6 +28,11 @@ try:
 except ImportError:
     _CV2_AVAILABLE = False
 
+try:
+    import folder_paths
+except ImportError:
+    folder_paths = None
+
 # ── Constants ────────────────────────────────────────────────────────────────
 LOG = "[Useapi.net]"
 BASE_URL = "https://api.useapi.net/v1"
@@ -80,6 +85,39 @@ def _get_sorted_list(original_list: list, default_val: str) -> list:
     return original_list
 
 # ── Shared Utilities ─────────────────────────────────────────────────────────
+
+def _is_safe_path(path: str) -> bool:
+    """Validate path safety to prevent traversal and SSRF.
+
+    Allowed paths:
+    1. Inside VIDEO_CACHE_DIR
+    2. Inside ComfyUI input/output/temp directories (if folder_paths available)
+    """
+    # Block URLs (rudimentary SSRF check)
+    if "://" in path:
+        return False
+
+    try:
+        real_path = os.path.realpath(path)
+    except Exception:
+        return False
+
+    allowed_roots = [os.path.realpath(VIDEO_CACHE_DIR)]
+
+    if folder_paths is not None:
+        try:
+            allowed_roots.append(os.path.realpath(folder_paths.get_input_directory()))
+            allowed_roots.append(os.path.realpath(folder_paths.get_output_directory()))
+            allowed_roots.append(os.path.realpath(folder_paths.get_temp_directory()))
+        except Exception:
+            pass
+
+    for root in allowed_roots:
+        if os.path.commonpath([real_path, root]) == root:
+            return True
+
+    return False
+
 
 def _get_token(api_token: str) -> str:
     """Return API token: use direct input, else USEAPI_TOKEN env var."""
@@ -1224,6 +1262,8 @@ class UseapiLoadVideoFrame:
                 f"{LOG} UseapiLoadVideoFrame requires opencv-python. "
                 "Install it: pip install opencv-python"
             )
+        if not _is_safe_path(video_path):
+            raise ValueError(f"{LOG} Security error: unsafe path or URL rejected: {video_path}")
         cap = cv2.VideoCapture(video_path)
         try:
             if not cap.isOpened():
@@ -1271,6 +1311,9 @@ class UseapiPreviewVideo:
     def execute(self, video_url: str, video_path: str):
         lines = [f"URL: {video_url}"]
         ui_videos = []
+
+        if video_path and not _is_safe_path(video_path):
+            raise ValueError(f"{LOG} Security error: unsafe path or URL rejected: {video_path}")
 
         if video_path and os.path.exists(video_path):
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
