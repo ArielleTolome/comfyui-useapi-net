@@ -17,6 +17,7 @@ jobs:
       - name: Check conditions and merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           # Function to check conditions for a PR
           check_and_merge() {
@@ -30,7 +31,7 @@ jobs:
 
             # Get PR details
             # statusCheckRollup.state: SUCCESS, PENDING, FAILURE, etc.
-            PR_DATA=$(gh pr view $PR_NUMBER --json reviews,statusCheckRollup,state)
+            PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews,statusCheckRollup,state)
 
             # Check if PR is open
             PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
@@ -69,7 +70,7 @@ jobs:
 
             # If all conditions met, merge
             echo "All conditions met. Merging PR #$PR_NUMBER..."
-            gh pr merge $PR_NUMBER --auto --squash
+            gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
           }
 
           # Handle event types
