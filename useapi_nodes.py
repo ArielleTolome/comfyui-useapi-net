@@ -352,6 +352,9 @@ def _runway_poll(task_id: str, token: str,
                 pbar.update_absolute(min(int(_elapsed / max_wait * 95), 95), 100)
 
         status, raw = _make_request(poll_url, "GET", headers, None, 30)
+        if status in [500, 502, 503, 504, 520, 522, 524]:
+            print(f"{LOG} Runway poll transient error {status}. Retrying...")
+            continue
         data = _check_status(status, raw, poll_url, f"Runway poll {task_id[:30]}")
         task_status = data.get("status", "")
         print(f"{LOG} Runway task {task_id[:30]}... → {task_status}")
@@ -371,7 +374,10 @@ def _runway_poll(task_id: str, token: str,
                     f"{LOG} Runway task SUCCEEDED but no artifacts in response: {data}"
                 )
             return artifacts
-        if task_status in ("FAILED", "CANCELLED", "THROTTLED"):
+        if task_status == "THROTTLED":
+            print(f"{LOG} Runway task {task_id[:30]}... is THROTTLED. Continuing to poll...")
+            continue
+        if task_status in ("FAILED", "CANCELLED"):
             raise RuntimeError(
                 f"{LOG} Runway task ended with status '{task_status}'. task_id={task_id}"
             )
