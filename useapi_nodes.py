@@ -8,9 +8,10 @@ import os
 import io
 import json
 import time
-import uuid
 import base64
 import hashlib
+import ipaddress
+import socket
 import shutil
 import tempfile
 import threading
@@ -41,6 +42,43 @@ _RUNWAY_STYLES = [
 # Images endpoint does not accept "none" as a style value
 _RUNWAY_STYLES_IMAGES = [s for s in _RUNWAY_STYLES if s != "none"]
 
+_CONFIG = {}
+
+def _load_config():
+    """Load default values from nodes_config.json if it exists."""
+    global _CONFIG
+    config_path = os.path.join(os.path.dirname(__file__), "nodes_config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                _CONFIG = json.load(f)
+            print(f"{LOG} Loaded config from {config_path}")
+        except Exception as e:
+            print(f"{LOG} Error loading nodes_config.json: {e}")
+
+_load_config()
+
+def _get_config_value(node: str, key: str, default):
+    """Get a configuration value with fallback."""
+    # Check node-specific config first
+    if node in _CONFIG and key in _CONFIG[node]:
+        return _CONFIG[node][key]
+    # Check global config
+    if key in _CONFIG:
+        return _CONFIG[key]
+    # Check global config with "default_" prefix
+    default_key = f"default_{key}"
+    if default_key in _CONFIG:
+        return _CONFIG[default_key]
+    return default
+
+def _get_sorted_list(original_list: list, default_val: str) -> list:
+    """Move the default value to the front of the list if present."""
+    if default_val in original_list:
+        new_list = [default_val] + [x for x in original_list if x != default_val]
+        return new_list
+    return original_list
+
 # ── Shared Utilities ─────────────────────────────────────────────────────────
 
 def _get_token(api_token: str) -> str:
@@ -65,10 +103,61 @@ def _auth_headers(token: str) -> dict:
 
 
 def _validate_url(url: str):
-    """Raise ValueError if URL scheme is not http/https (prevents SSRF)."""
-    parsed = urllib.parse.urlparse(url)
+    """Validate outbound URL to reduce SSRF risk."""
+    parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"{LOG} Invalid URL scheme '{parsed.scheme}'. Only http/https are allowed.")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"{LOG} Invalid URL '{url}'. Missing hostname.")
+
+    host_l = host.lower()
+    if host_l == "localhost" or host_l.endswith(".localhost"):
+        raise ValueError(f"{LOG} Unsafe URL host '{host}'.")
+
+    def _is_disallowed(ip_obj):
+        return (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+
+    # Literal IP host
+    try:
+        ip_obj = ipaddress.ip_address(host_l)
+        if _is_disallowed(ip_obj):
+            raise ValueError(f"{LOG} Unsafe URL host '{host}'.")
+        return
+    except ValueError:
+        pass
+
+    # Resolve DNS host and block any private/local target
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"{LOG} Unable to resolve host '{host}': {e}") from e
+    if not infos:
+        raise ValueError(f"{LOG} Unable to resolve host '{host}'.")
+    for info in infos:
+        resolved = info[4][0]
+        try:
+            ip_obj = ipaddress.ip_address(resolved)
+        except ValueError:
+            # Ignore non-IP entries returned by resolver.
+            continue
+        if _is_disallowed(ip_obj):
+            raise ValueError(f"{LOG} Unsafe URL host '{host}' resolved to '{resolved}'.")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects to non-public hosts/schemes."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _DEFAULT_HEADERS = {
@@ -81,13 +170,16 @@ _DEFAULT_HEADERS = {
 
 
 def _make_request(url: str, method: str = "GET", headers: dict = None,
-                  data: bytes = None, timeout: int = 600):
+                  data: bytes = None, timeout: int = None):
     """Make an HTTP request. Returns (status_code, response_body_bytes)."""
     _validate_url(url)
+    if timeout is None:
+        timeout = _get_config_value("global", "default_timeout", 600)
     merged = {**_DEFAULT_HEADERS, **(headers or {})}
     req = urllib.request.Request(url, data=data, headers=merged, method=method)
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -150,34 +242,6 @@ def _check_status(status: int, body: bytes, url: str, context: str = "") -> dict
     raise RuntimeError(f"{LOG} {label}HTTP {status} from {url}.\nDetail: {detail}")
 
 
-def _build_multipart(fields: dict, files: dict):
-    """Build multipart/form-data without the requests library.
-
-    Args:
-        fields: {"name": "string_value"}
-        files:  {"name": ("filename.ext", bytes_data, "mime/type")}
-    Returns:
-        (body_bytes, content_type_string_with_boundary)
-    """
-    boundary = "----ComfyUIBoundary" + uuid.uuid4().hex
-    body = b""
-    for name, value in fields.items():
-        body += f"--{boundary}\r\n".encode()
-        body += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
-        body += str(value).encode()
-        body += b"\r\n"
-    for name, (filename, data, ctype) in files.items():
-        body += f"--{boundary}\r\n".encode()
-        body += (
-            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
-            f"Content-Type: {ctype}\r\n\r\n"
-        ).encode()
-        body += data
-        body += b"\r\n"
-    body += f"--{boundary}--\r\n".encode()
-    return body, f"multipart/form-data; boundary={boundary}"
-
-
 def _tensor_to_png_bytes(tensor: torch.Tensor) -> bytes:
     """Convert ComfyUI IMAGE tensor (1, H, W, 3) float32 → PNG bytes."""
     arr = tensor[0].cpu().detach().numpy()
@@ -205,7 +269,8 @@ def _download_file(url: str, ext: str = ".mp4") -> str:
         print(f"{LOG} Cache hit: {dest}")
         return dest
     print(f"{LOG} Downloading to {dest} ...")
-    with urllib.request.urlopen(url, timeout=120) as resp:
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    with opener.open(url, timeout=120) as resp:
         data = resp.read()
     with open(dest, "wb") as f:
         f.write(data)
@@ -235,12 +300,27 @@ def _runway_poll(task_id: str, token: str,
     headers = _auth_headers(token)
     deadline = time.time() + max_wait
     _start = time.time()
+    # Adaptive polling: start with shorter interval, ramp up to poll_interval
+    current_interval = min(2.0, poll_interval)
     while time.time() < deadline:
-        time.sleep(poll_interval)
+        # Sleep in chunks to allow progress updates (responsiveness)
+        sleep_end = time.time() + current_interval
+        while time.time() < sleep_end:
+            chunk = min(0.1, sleep_end - time.time())
+            if chunk > 0:
+                time.sleep(chunk)
+            if pbar is not None:
+                _elapsed = time.time() - _start
+                pbar.update_absolute(min(int(_elapsed / max_wait * 95), 95), 100)
+
         status, raw = _make_request(poll_url, "GET", headers, None, 30)
         data = _check_status(status, raw, poll_url, f"Runway poll {task_id[:30]}")
         task_status = data.get("status", "")
         print(f"{LOG} Runway task {task_id[:30]}... → {task_status}")
+
+        # Increase interval for next loop, capped at poll_interval
+        current_interval = min(current_interval * 1.5, poll_interval)
+
         if pbar is not None:
             _elapsed = time.time() - _start
             pbar.update_absolute(min(int(_elapsed / max_wait * 95), 95), 100)
@@ -370,11 +450,18 @@ class UseapiVeoGenerate:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Apply defaults from config
+        default_model = _get_config_value("UseapiVeoGenerate", "model", "veo-3.1-fast")
+        default_ar = _get_config_value("UseapiVeoGenerate", "aspect_ratio", "landscape")
+
+        models = ["veo-3.1-fast", "veo-3.1-quality", "veo-3.1-fast-relaxed", "veo-3", "veo-2"]
+        aspect_ratios = ["landscape", "portrait"]
+
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
-                "model": (["veo-3.1-fast", "veo-3.1-quality", "veo-3.1-fast-relaxed", "veo-3", "veo-2"],),
-                "aspect_ratio": (["landscape", "portrait"],),
+                "model": (_get_sorted_list(models, default_model),),
+                "aspect_ratio": (_get_sorted_list(aspect_ratios, default_ar),),
             },
             "optional": {
                 "api_token": ("STRING", {"default": ""}),
@@ -417,7 +504,8 @@ class UseapiVeoGenerate:
         if pbar is not None:
             _pt, _done = _start_progress_thread(pbar, 150)
         try:
-            status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=600)
+            # Use None for timeout to respect global config default
+            status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=None)
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
@@ -572,11 +660,17 @@ class UseapiGoogleFlowGenerateImage:
 
     @classmethod
     def INPUT_TYPES(cls):
+        default_model = _get_config_value("UseapiGoogleFlowGenerateImage", "model", "imagen-4")
+        default_ar = _get_config_value("UseapiGoogleFlowGenerateImage", "aspect_ratio", "landscape")
+
+        models = ["imagen-4", "nano-banana", "nano-banana-pro"]
+        aspect_ratios = ["landscape", "portrait"]
+
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
-                "model": (["imagen-4", "nano-banana", "nano-banana-pro"],),
-                "aspect_ratio": (["landscape", "portrait"],),
+                "model": (_get_sorted_list(models, default_model),),
+                "aspect_ratio": (_get_sorted_list(aspect_ratios, default_ar),),
             },
             "optional": {
                 "api_token": ("STRING", {"default": ""}),
@@ -624,8 +718,9 @@ class UseapiGoogleFlowGenerateImage:
                         _err = _resp.get("error") if isinstance(_resp.get("error"), dict) else {}
                         _rmsg = _resp.get("message", "") or _err.get("message", "")
                         if "reCAPTCHA" in _rmsg or "captcha" in _rmsg.lower():
-                            print(f"{LOG} Google Flow Image: reCAPTCHA 403, retrying ({_attempt + 1}/3)...")
-                            time.sleep(8)
+                            wait_time = 2 * (2 ** _attempt)
+                            print(f"{LOG} Google Flow Image: reCAPTCHA 403, retrying ({_attempt + 1}/3) in {wait_time}s...")
+                            time.sleep(wait_time)
                             continue
                     except Exception:
                         pass
@@ -815,9 +910,17 @@ class UseapiRunwayGenerate:
 
     @classmethod
     def INPUT_TYPES(cls):
+        default_model = _get_config_value("UseapiRunwayGenerate", "model", "gen4_5")
+        default_ar = _get_config_value("UseapiRunwayGenerate", "aspect_ratio", "16:9")
+        default_secs = str(_get_config_value("UseapiRunwayGenerate", "seconds", "10"))
+
+        models = ["gen4_5", "gen4", "gen4turbo", "gen3turbo"]
+        aspect_ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
+        seconds = ["5", "8", "10"]
+
         return {
             "required": {
-                "model": (["gen4_5", "gen4", "gen4turbo", "gen3turbo"],),
+                "model": (_get_sorted_list(models, default_model),),
                 "text_prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
@@ -825,8 +928,8 @@ class UseapiRunwayGenerate:
                 "image": ("IMAGE",),
                 "asset_id": ("STRING", {"default": ""}),
                 "email": ("STRING", {"default": ""}),
-                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
-                "seconds": (["5", "8", "10"],),
+                "aspect_ratio": (_get_sorted_list(aspect_ratios, default_ar),),
+                "seconds": (_get_sorted_list(seconds, default_secs),),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 4294967294}),
                 "explore_mode": ("BOOLEAN", {"default": True}),
                 "max_jobs": ("INT", {"default": 5, "min": 1, "max": 10}),
