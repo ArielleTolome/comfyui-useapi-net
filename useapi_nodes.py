@@ -64,6 +64,13 @@ def _auth_headers(token: str) -> dict:
     }
 
 
+def _validate_url(url: str):
+    """Raise ValueError if URL scheme is not http/https (prevents SSRF)."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"{LOG} Invalid URL scheme '{parsed.scheme}'. Only http/https are allowed.")
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -76,6 +83,7 @@ _DEFAULT_HEADERS = {
 def _make_request(url: str, method: str = "GET", headers: dict = None,
                   data: bytes = None, timeout: int = 600):
     """Make an HTTP request. Returns (status_code, response_body_bytes)."""
+    _validate_url(url)
     merged = {**_DEFAULT_HEADERS, **(headers or {})}
     req = urllib.request.Request(url, data=data, headers=merged, method=method)
     try:
@@ -189,6 +197,7 @@ def _bytes_to_tensor(img_bytes: bytes) -> torch.Tensor:
 
 def _download_file(url: str, ext: str = ".mp4") -> str:
     """Download URL to cache dir with MD5-hash filename. Returns local path."""
+    _validate_url(url)
     os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
     fname = hashlib.md5(url.encode()).hexdigest() + ext
     dest = os.path.join(VIDEO_CACHE_DIR, fname)
