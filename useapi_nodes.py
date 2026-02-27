@@ -10,6 +10,8 @@ import json
 import time
 import base64
 import hashlib
+import ipaddress
+import socket
 import shutil
 import tempfile
 import threading
@@ -100,6 +102,64 @@ def _auth_headers(token: str) -> dict:
     }
 
 
+def _validate_url(url: str):
+    """Validate outbound URL to reduce SSRF risk."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"{LOG} Invalid URL scheme '{parsed.scheme}'. Only http/https are allowed.")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"{LOG} Invalid URL '{url}'. Missing hostname.")
+
+    host_l = host.lower()
+    if host_l == "localhost" or host_l.endswith(".localhost"):
+        raise ValueError(f"{LOG} Unsafe URL host '{host}'.")
+
+    def _is_disallowed(ip_obj):
+        return (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+
+    # Literal IP host
+    try:
+        ip_obj = ipaddress.ip_address(host_l)
+        if _is_disallowed(ip_obj):
+            raise ValueError(f"{LOG} Unsafe URL host '{host}'.")
+        return
+    except ValueError:
+        pass
+
+    # Resolve DNS host and block any private/local target
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"{LOG} Unable to resolve host '{host}': {e}") from e
+    if not infos:
+        raise ValueError(f"{LOG} Unable to resolve host '{host}'.")
+    for info in infos:
+        resolved = info[4][0]
+        try:
+            ip_obj = ipaddress.ip_address(resolved)
+        except ValueError:
+            # Ignore non-IP entries returned by resolver.
+            continue
+        if _is_disallowed(ip_obj):
+            raise ValueError(f"{LOG} Unsafe URL host '{host}' resolved to '{resolved}'.")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects to non-public hosts/schemes."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -112,12 +172,14 @@ _DEFAULT_HEADERS = {
 def _make_request(url: str, method: str = "GET", headers: dict = None,
                   data: bytes = None, timeout: int = None):
     """Make an HTTP request. Returns (status_code, response_body_bytes)."""
+    _validate_url(url)
     if timeout is None:
         timeout = _get_config_value("global", "default_timeout", 600)
     merged = {**_DEFAULT_HEADERS, **(headers or {})}
     req = urllib.request.Request(url, data=data, headers=merged, method=method)
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -199,6 +261,7 @@ def _bytes_to_tensor(img_bytes: bytes) -> torch.Tensor:
 
 def _download_file(url: str, ext: str = ".mp4") -> str:
     """Download URL to cache dir with MD5-hash filename. Returns local path."""
+    _validate_url(url)
     os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
     fname = hashlib.md5(url.encode()).hexdigest() + ext
     dest = os.path.join(VIDEO_CACHE_DIR, fname)
@@ -206,7 +269,8 @@ def _download_file(url: str, ext: str = ".mp4") -> str:
         print(f"{LOG} Cache hit: {dest}")
         return dest
     print(f"{LOG} Downloading to {dest} ...")
-    with urllib.request.urlopen(url, timeout=120) as resp:
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    with opener.open(url, timeout=120) as resp:
         data = resp.read()
     with open(dest, "wb") as f:
         f.write(data)
