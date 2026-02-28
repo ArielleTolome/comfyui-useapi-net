@@ -1044,7 +1044,7 @@ class UseapiRunwayGenerate:
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
         data = _check_status(status, raw, url, f"Runway {model} create")
 
-        task_id = data.get("task", {}).get("taskId", "")
+        task_id = _extract_runway_task_id(data)
         if not task_id:
             raise RuntimeError(
                 f"{LOG} Runway create: 'taskId' missing in response. "
@@ -1103,10 +1103,11 @@ class UseapiRunwayVideoToVideo:
         body = {
             asset_key: video_asset_id,
             "text_prompt": text_prompt,
-            "seconds": int(seconds),
             "exploreMode": explore_mode,
             "maxJobs": max_jobs,
         }
+        if model != "gen4":
+            body["seconds"] = int(seconds)
         if seed != 0:
             body["seed"] = seed
 
@@ -1204,7 +1205,7 @@ class UseapiRunwayFramesGenerate:
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
         data = _check_status(status, raw, url, "Runway Frames create")
 
-        task_id = data.get("taskId", "") or data.get("task", {}).get("taskId", "")
+        task_id = _extract_runway_task_id(data)
         if not task_id:
             raise RuntimeError(
                 f"{LOG} Runway Frames: 'taskId' missing in response. "
