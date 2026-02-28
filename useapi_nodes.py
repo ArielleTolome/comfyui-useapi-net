@@ -11,7 +11,6 @@ import logging
 import time
 import zlib
 import base64
-import hashlib
 import ipaddress
 import socket
 import shutil
