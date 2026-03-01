@@ -25,7 +25,7 @@ except ImportError:
     from unittest.mock import MagicMock
     sys.modules["cv2"] = MagicMock()
 
-from useapi_nodes import UseapiVeoConcatenate
+from useapi_nodes import UseapiVeoConcatenate, UseapiVeoGenerate
 
 class TestVeoConcatenateValidation(unittest.TestCase):
     def test_insufficient_media_args(self):
@@ -61,6 +61,56 @@ class TestVeoConcatenateValidation(unittest.TestCase):
                 media_2="id2",
                 api_token="dummy"
             )
+
+class TestVeoGenerateValidation(unittest.TestCase):
+    @mock.patch('useapi_nodes._make_request')
+    def test_veo_generate_media_fallback(self, mock_make_request):
+        import json
+
+        # Test modern media array parsing
+        mock_make_request.return_value = (200, json.dumps({
+            "media": [{
+                "mediaMetadata": {
+                    "mediaStatus": {
+                        "mediaGenerationStatus": "SUCCESS"
+                    }
+                },
+                "videoUrl": "http://example.com/video1.mp4",
+                "mediaGenerationId": "gen_id_1"
+            }]
+        }).encode())
+
+        node = UseapiVeoGenerate()
+        # Should not raise exception
+        # We mock _download_file to avoid actual downloads
+        with mock.patch('useapi_nodes._download_file', return_value="local_path.mp4"):
+            video_url, video_path, media_gen_id = node.execute(
+                prompt="test", model="veo-3.1-fast", aspect_ratio="landscape", api_token="dummy"
+            )
+            self.assertEqual(video_url, "http://example.com/video1.mp4")
+            self.assertEqual(media_gen_id, "gen_id_1")
+
+        # Test legacy operations array parsing fallback
+        mock_make_request.return_value = (200, json.dumps({
+            "operations": [{
+                "status": "SUCCESS",
+                "operation": {
+                    "metadata": {
+                        "video": {
+                            "fifeUrl": "http://example.com/video2.mp4",
+                            "mediaGenerationId": "gen_id_2"
+                        }
+                    }
+                }
+            }]
+        }).encode())
+
+        with mock.patch('useapi_nodes._download_file', return_value="local_path.mp4"):
+            video_url, video_path, media_gen_id = node.execute(
+                prompt="test", model="veo-3.1-fast", aspect_ratio="landscape", api_token="dummy"
+            )
+            self.assertEqual(video_url, "http://example.com/video2.mp4")
+            self.assertEqual(media_gen_id, "gen_id_2")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

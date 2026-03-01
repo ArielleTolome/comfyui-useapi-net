@@ -582,20 +582,31 @@ class UseapiVeoGenerate:
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
-        ops = data.get("operations", [])
-        if not ops:
-            raise RuntimeError(f"{LOG} Veo generate returned no operations: {data}")
-        op = ops[0]
-        op_status = op.get("status", "")
-        if "FAIL" in op_status.upper():
-            raise RuntimeError(f"{LOG} Veo generation failed. Status={op_status}. op={op}")
-        video_meta = op.get("operation", {}).get("metadata", {}).get("video", {})
-        video_url = video_meta.get("fifeUrl", "")
-        media_gen_id = video_meta.get("mediaGenerationId", "")
+        media_list = data.get("media", [])
+        if not media_list:
+            # Fallback to operations for backward compatibility if media is missing
+            ops = data.get("operations", [])
+            if not ops:
+                raise RuntimeError(f"{LOG} Veo generate returned no media or operations: {data}")
+            op = ops[0]
+            op_status = op.get("status", "")
+            if "FAIL" in op_status.upper():
+                raise RuntimeError(f"{LOG} Veo generation failed. Status={op_status}. op={op}")
+            video_meta = op.get("operation", {}).get("metadata", {}).get("video", {})
+            video_url = video_meta.get("fifeUrl", "")
+            media_gen_id = video_meta.get("mediaGenerationId", "")
+        else:
+            media_item = media_list[0]
+            media_status = media_item.get("mediaMetadata", {}).get("mediaStatus", {}).get("mediaGenerationStatus", "")
+            if "FAIL" in media_status.upper():
+                raise RuntimeError(f"{LOG} Veo generation failed. Status={media_status}. media={media_item}")
+            video_url = media_item.get("videoUrl", "")
+            media_gen_id = media_item.get("mediaGenerationId", "")
+
         if not video_url:
             raise RuntimeError(
-                f"{LOG} Veo generate: 'fifeUrl' missing in response. "
-                f"The API might have changed. Detail: {video_meta}"
+                f"{LOG} Veo generate: 'videoUrl' missing in response. "
+                f"The API might have changed. Detail: {data}"
             )
 
         logger.info(f"{LOG} Veo Generate: complete. mediaGenerationId={media_gen_id[:50]}...")
@@ -644,13 +655,18 @@ class UseapiVeoUpscale:
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
-        ops = data.get("operations", [])
-        if not ops:
-            raise RuntimeError(f"{LOG} Veo upscale returned no operations: {data}")
-        video_meta = ops[0].get("operation", {}).get("metadata", {}).get("video", {})
-        video_url = video_meta.get("fifeUrl", "")
+        media_list = data.get("media", [])
+        if not media_list:
+            ops = data.get("operations", [])
+            if not ops:
+                raise RuntimeError(f"{LOG} Veo upscale returned no media or operations: {data}")
+            video_meta = ops[0].get("operation", {}).get("metadata", {}).get("video", {})
+            video_url = video_meta.get("fifeUrl", "")
+        else:
+            video_url = media_list[0].get("videoUrl", "")
+
         if not video_url:
-            raise RuntimeError(f"{LOG} Veo upscale: no fifeUrl in response.")
+            raise RuntimeError(f"{LOG} Veo upscale: no videoUrl or fifeUrl in response.")
         video_path = _download_file(video_url, ".mp4")
         return (video_url, video_path)
 
@@ -703,14 +719,20 @@ class UseapiVeoExtend:
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
-        ops = data.get("operations", [])
-        if not ops:
-            raise RuntimeError(f"{LOG} Veo extend returned no operations: {data}")
-        video_meta = ops[0].get("operation", {}).get("metadata", {}).get("video", {})
-        video_url = video_meta.get("fifeUrl", "")
-        media_gen_id = video_meta.get("mediaGenerationId", "")
+        media_list = data.get("media", [])
+        if not media_list:
+            ops = data.get("operations", [])
+            if not ops:
+                raise RuntimeError(f"{LOG} Veo extend returned no media or operations: {data}")
+            video_meta = ops[0].get("operation", {}).get("metadata", {}).get("video", {})
+            video_url = video_meta.get("fifeUrl", "")
+            media_gen_id = video_meta.get("mediaGenerationId", "")
+        else:
+            video_url = media_list[0].get("videoUrl", "")
+            media_gen_id = media_list[0].get("mediaGenerationId", "")
+
         if not video_url:
-            raise RuntimeError(f"{LOG} Veo extend: no fifeUrl in response.")
+            raise RuntimeError(f"{LOG} Veo extend: no videoUrl or fifeUrl in response.")
         video_path = _download_file(video_url, ".mp4")
         return (video_url, video_path, media_gen_id)
 
@@ -735,7 +757,7 @@ class UseapiGoogleFlowGenerateImage:
         default_model = _get_config_value("UseapiGoogleFlowGenerateImage", "model", "imagen-4")
         default_ar = _get_config_value("UseapiGoogleFlowGenerateImage", "aspect_ratio", "landscape")
 
-        models = ["imagen-4", "nano-banana", "nano-banana-pro"]
+        models = ["imagen-4", "nano-banana", "nano-banana-pro", "nano-banana-2"]
         aspect_ratios = ["landscape", "portrait"]
 
         return {
@@ -752,13 +774,18 @@ class UseapiGoogleFlowGenerateImage:
                 "reference_1": ("STRING", {"default": ""}),
                 "reference_2": ("STRING", {"default": ""}),
                 "reference_3": ("STRING", {"default": ""}),
+                "reference_4": ("STRING", {"default": ""}),
+                "reference_5": ("STRING", {"default": ""}),
+                "reference_6": ("STRING", {"default": ""}),
             },
         }
 
     def execute(self, prompt: str, model: str, aspect_ratio: str,
                 api_token: str = "", email: str = "", count: int = 4,
                 seed: int = 0, reference_1: str = "",
-                reference_2: str = "", reference_3: str = ""):
+                reference_2: str = "", reference_3: str = "",
+                reference_4: str = "", reference_5: str = "",
+                reference_6: str = ""):
         token = _get_token(api_token)
         url = f"{BASE_URL}/google-flow/images"
         body = {
@@ -771,7 +798,7 @@ class UseapiGoogleFlowGenerateImage:
             body["seed"] = seed & 0x7FFFFFFF
         if email.strip():
             body["email"] = email.strip()
-        for i, ref in enumerate([reference_1, reference_2, reference_3], start=1):
+        for i, ref in enumerate([reference_1, reference_2, reference_3, reference_4, reference_5, reference_6], start=1):
             if ref.strip():
                 body[f"reference_{i}"] = ref.strip()
 
@@ -1536,7 +1563,7 @@ class UseapiRunwayImages:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (["nano-banana", "nano-banana-pro", "gen4", "gen4-turbo"],),
+                "model": (["nano-banana", "nano-banana-pro", "nano-banana-2", "gen4", "gen4-turbo"],),
                 "text_prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
@@ -1551,6 +1578,9 @@ class UseapiRunwayImages:
                 "image_asset_id_1": ("STRING", {"default": ""}),
                 "image_asset_id_2": ("STRING", {"default": ""}),
                 "image_asset_id_3": ("STRING", {"default": ""}),
+                "image_asset_id_4": ("STRING", {"default": ""}),
+                "image_asset_id_5": ("STRING", {"default": ""}),
+                "image_asset_id_6": ("STRING", {"default": ""}),
                 "poll_interval": ("INT", {"default": 5, "min": 5, "max": 60}),
                 "max_wait": ("INT", {"default": 120, "min": 30, "max": 600}),
             },
@@ -1562,7 +1592,8 @@ class UseapiRunwayImages:
                 num_images: str = "1", style: str = "vivid",
                 diversity: int = 2, seed: int = 0,
                 image_asset_id_1: str = "", image_asset_id_2: str = "",
-                image_asset_id_3: str = "",
+                image_asset_id_3: str = "", image_asset_id_4: str = "",
+                image_asset_id_5: str = "", image_asset_id_6: str = "",
                 poll_interval: int = 5, max_wait: int = 120):
         token = _get_token(api_token)
         url = f"{BASE_URL}/runwayml/images/create"
@@ -1580,7 +1611,7 @@ class UseapiRunwayImages:
             body["seed"] = seed
         if email.strip():
             body["email"] = email.strip()
-        for i, aid in enumerate([image_asset_id_1, image_asset_id_2, image_asset_id_3], 1):
+        for i, aid in enumerate([image_asset_id_1, image_asset_id_2, image_asset_id_3, image_asset_id_4, image_asset_id_5, image_asset_id_6], 1):
             if aid.strip():
                 body[f"imageAssetId{i}"] = aid.strip()
 

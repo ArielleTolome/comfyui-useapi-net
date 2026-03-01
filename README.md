@@ -134,8 +134,8 @@ Concatenate 2-5 Veo videos with optional trim controls.
 - **Output**: `video_path`
 
 #### `UseapiGoogleFlowGenerateImage`
-Generate images using Imagen 4, Nano Banana, or Nano Banana Pro.
-- **Input**: `prompt`, `model`, `aspect_ratio`, `count`, `reference_1/2/3`
+Generate images using Imagen 4, Nano Banana, Nano Banana Pro, or Nano Banana 2.
+- **Input**: `prompt`, `model`, `aspect_ratio`, `count`, `reference_1` to `reference_6`
 - **Output**: `image`, `image_url`, `media_generation_id`, `all_urls`
 
 #### `UseapiGoogleFlowUploadAsset`
@@ -168,7 +168,7 @@ Generate high-quality 1080p images using Runway Frames.
 - **Output**: `image`, `image_url`, `all_urls`, `task_id`
 
 #### `UseapiRunwayImages`
-Generate images using Runway nano-banana, gen4, or gen4-turbo.
+Generate images using Runway nano-banana, nano-banana-pro, nano-banana-2, gen4, or gen4-turbo.
 - **Input**: `model`, `text_prompt`, `aspect_ratio`, `resolution`, `num_images`, `style`
 - **Output**: `image`, `image_url`, `all_urls`, `task_id`
 
