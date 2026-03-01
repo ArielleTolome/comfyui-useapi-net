@@ -62,5 +62,47 @@ class TestVeoConcatenateValidation(unittest.TestCase):
                 api_token="dummy"
             )
 
+class TestCheckStatusValidation(unittest.TestCase):
+    def test_redact_token(self):
+        from useapi_nodes import _check_status
+        token = "secret_token_123"
+        url = f"https://api.useapi.net/v1/runwayml/gen4/upscale?token={token}"
+        body = b'{"error": {"message": "Invalid auth token: secret_token_123"}}'
+
+        with self.assertRaisesRegex(RuntimeError, r"Unauthorized \(401\).*URL: https://api.useapi.net/v1/runwayml/gen4/upscale") as context:
+            _check_status(401, body, url, "Test context", token)
+
+        # Verify the actual exception message does not contain the token
+        exc_str = str(context.exception)
+        self.assertNotIn(token, exc_str)
+
+    def test_redact_token_detail(self):
+        from useapi_nodes import _check_status
+        token = "secret_token_123"
+        url = f"https://api.useapi.net/v1/runwayml/gen4/upscale?token={token}"
+        body = b'{"error": "Invalid auth token: secret_token_123"}'
+
+        # Test a generic status code (like 409) to ensure detail is printed
+        with self.assertRaisesRegex(RuntimeError, r"HTTP 409 from https://api.useapi.net/v1/runwayml/gen4/upscale\.\nDetail: Invalid auth token: \*\*\*") as context:
+            _check_status(409, body, url, "Test context", token)
+
+        # Verify the actual exception message does not contain the token
+        exc_str = str(context.exception)
+        self.assertNotIn(token, exc_str)
+        self.assertIn("***", exc_str)
+
+    def test_safe_url(self):
+        from useapi_nodes import _check_status
+        token = "dummy_token"
+        url = "https://api.useapi.net/v1/endpoint?query=sensitive_param#fragment"
+        body = b'{"error": "Not Found"}'
+
+        with self.assertRaisesRegex(RuntimeError, r"Not Found \(404\).*URL: https://api.useapi.net/v1/endpoint") as context:
+            _check_status(404, body, url, "Test context", token)
+
+        exc_str = str(context.exception)
+        self.assertNotIn("sensitive_param", exc_str)
+        self.assertNotIn("fragment", exc_str)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

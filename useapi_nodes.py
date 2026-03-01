@@ -122,6 +122,21 @@ def _is_safe_path(path: str) -> bool:
     return False
 
 
+def _safe_url(url: str) -> str:
+    """Return URL without query parameters or fragments to prevent logging sensitive info."""
+    if not url:
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _redact_token(text: str, token: str) -> str:
+    """Redact raw API token from error messages if present."""
+    if not text or not token:
+        return text
+    return text.replace(token, "***")
+
+
 def _get_token(api_token: str) -> str:
     """Return API token: use direct input, else USEAPI_TOKEN env var."""
     token = (api_token or "").strip()
@@ -236,7 +251,7 @@ def _make_request(url: str, method: str = "GET", headers: dict = None,
         )
 
 
-def _check_status(status: int, body: bytes, url: str, context: str = "") -> dict:
+def _check_status(status: int, body: bytes, url: str, context: str = "", token: str = "") -> dict:
     """Parse JSON response body; raise descriptive error if status != 200."""
     try:
         data = json.loads(body) if body else {}
@@ -247,60 +262,64 @@ def _check_status(status: int, body: bytes, url: str, context: str = "") -> dict
 
     detail = data.get("error", body[:300].decode(errors="replace"))
     label = f"{LOG} [{context}]" if context else LOG
+    safe_url = _safe_url(url)
+
+    def _raise(msg_text: str):
+        raise RuntimeError(_redact_token(msg_text, token))
 
     if status == 400:
-        raise RuntimeError(
+        _raise(
             f"{label} Bad Request (400). Please check your input parameters "
-            f"(prompts, models, aspect ratios). URL: {url}\nDetail: {detail}"
+            f"(prompts, models, aspect ratios). URL: {safe_url}\nDetail: {detail}"
         )
     if status == 401:
-        raise RuntimeError(
+        _raise(
             f"{label} Unauthorized (401). Your API token is invalid or expired. "
-            f"Please verify it has no extra whitespace/newlines. URL: {url}"
+            f"Please verify it has no extra whitespace/newlines. URL: {safe_url}"
         )
     if status == 403:
         _err_obj = data.get("error") if isinstance(data.get("error"), dict) else {}
         msg = data.get("message", "") or _err_obj.get("message", "")
         raw_text = body[:500].decode(errors="replace") if body else ""
         if "reCAPTCHA" in (msg + raw_text) or "captcha" in (msg + raw_text).lower():
-            raise RuntimeError(
+            _raise(
                 f"{label} Transient reCAPTCHA error (403). This is an intermittent Google-side "
-                f"limit. Retry in a few seconds. URL: {url}\nDetail: {detail}"
+                f"limit. Retry in a few seconds. URL: {safe_url}\nDetail: {detail}"
             )
         if detail == "API error: 403":
-            raise RuntimeError(
+            _raise(
                 f"{label} Google returned 403 to Useapi.net (\"API error: 403\"). "
                 "This is usually a transient Google-side block — retry in a few seconds. "
                 "If it persists, verify that your Google/service account has access to this "
-                f"model at useapi.net. URL: {url}\nRaw response: {raw_text[:300]}"
+                f"model at useapi.net. URL: {safe_url}\nRaw response: {raw_text[:300]}"
             )
-        raise RuntimeError(
+        _raise(
             f"{label} Forbidden (403). The Google/service account linked to your "
             "Useapi.net token may not have access to this API or model. "
-            f"Verify your account settings at useapi.net. URL: {url}\nDetail: {detail}"
+            f"Verify your account settings at useapi.net. URL: {safe_url}\nDetail: {detail}"
         )
     if status == 404:
-        raise RuntimeError(
+        _raise(
             f"{label} Not Found (404). The requested resource or endpoint was not found. "
-            f"URL: {url}\nDetail: {detail}"
+            f"URL: {safe_url}\nDetail: {detail}"
         )
     if status == 408:
-        raise RuntimeError(
+        _raise(
             f"{label} Request Timeout (408). The generation took too long. "
-            f"Try increasing the timeout in nodes_config.json. URL: {url}\nDetail: {detail}"
+            f"Try increasing the timeout in nodes_config.json. URL: {safe_url}\nDetail: {detail}"
         )
     if status == 429:
-        raise RuntimeError(
+        _raise(
             f"{label} Rate Limited (429). You are sending too many requests. "
-            f"Wait 5-10s or add more Useapi.net accounts. URL: {url}\nDetail: {detail}"
+            f"Wait 5-10s or add more Useapi.net accounts. URL: {safe_url}\nDetail: {detail}"
         )
     if status in (500, 502, 503, 504):
-        raise RuntimeError(
+        _raise(
             f"{label} Server Error ({status}). The service is temporarily unavailable. "
-            f"Please retry in a moment. URL: {url}\nDetail: {detail}"
+            f"Please retry in a moment. URL: {safe_url}\nDetail: {detail}"
         )
 
-    raise RuntimeError(f"{label} HTTP {status} from {url}.\nDetail: {detail}")
+    _raise(f"{label} HTTP {status} from {safe_url}.\nDetail: {detail}")
 
 
 def _tensor_to_png_bytes(tensor: torch.Tensor) -> bytes:
@@ -378,7 +397,7 @@ def _runway_poll(task_id: str, token: str,
         if status in [500, 502, 503, 504, 520, 522, 524]:
             logger.info(f"{LOG} Runway poll transient error {status}. Retrying...")
             continue
-        data = _check_status(status, raw, poll_url, f"Runway poll {task_id[:30]}")
+        data = _check_status(status, raw, poll_url, f"Runway poll {task_id[:30]}", token)
         task_status = data.get("status", "")
         logger.info(f"{LOG} Runway task {task_id[:30]}... → {task_status}")
 
@@ -430,7 +449,7 @@ def _runway_upload_image(token: str, image_tensor: torch.Tensor,
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "image/png"}
     logger.info(f"{LOG} Runway: uploading image asset...")
     status, raw = _make_request(url, "POST", headers, png_bytes, timeout=60)
-    data = _check_status(status, raw, url, "Runway upload asset")
+    data = _check_status(status, raw, url, "Runway upload asset", token)
     asset_id = data.get("assetId", "") or data.get("id", "")
     if not asset_id:
         raise RuntimeError(f"{LOG} Runway upload: no assetId in response: {data}")
@@ -578,7 +597,7 @@ class UseapiVeoGenerate:
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
-        data = _check_status(status, raw, url, "Veo generate")
+        data = _check_status(status, raw, url, "Veo generate", token)
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
@@ -640,7 +659,7 @@ class UseapiVeoUpscale:
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
-        data = _check_status(status, raw, url, "Veo upscale")
+        data = _check_status(status, raw, url, "Veo upscale", token)
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
@@ -699,7 +718,7 @@ class UseapiVeoExtend:
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
-        data = _check_status(status, raw, url, "Veo extend")
+        data = _check_status(status, raw, url, "Veo extend", token)
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
@@ -800,7 +819,7 @@ class UseapiGoogleFlowGenerateImage:
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
-        data = _check_status(status, raw, url, "Google Flow generate image")
+        data = _check_status(status, raw, url, "Google Flow generate image", token)
         if pbar is not None:
             pbar.update_absolute(100, 100)
 
@@ -870,7 +889,7 @@ class UseapiGoogleFlowUploadAsset:
 
         logger.info(f"{LOG} Google Flow Upload Asset: uploading for {email_clean}...")
         status, raw = _make_request(url, "POST", headers, png_bytes, timeout=60)
-        data = _check_status(status, raw, url, "Google Flow upload asset")
+        data = _check_status(status, raw, url, "Google Flow upload asset", token)
 
         # Response: {"mediaGenerationId": {"mediaGenerationId": "user:..."}, ...}
         nested = data.get("mediaGenerationId", "")
@@ -920,7 +939,7 @@ class UseapiGoogleFlowImageUpscale:
 
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=300)
-        data = _check_status(status, raw, url, "Google Flow image upscale")
+        data = _check_status(status, raw, url, "Google Flow image upscale", token)
 
         encoded = data.get("encodedImage", "")
         if not encoded:
@@ -1042,7 +1061,7 @@ class UseapiRunwayGenerate:
         logger.info(f"{LOG} Runway Generate: model={model}, {seconds}s, prompt='{text_prompt[:60]}'")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, f"Runway {model} create")
+        data = _check_status(status, raw, url, f"Runway {model} create", token)
 
         task_id = data.get("task", {}).get("taskId", "")
         if not task_id:
@@ -1113,7 +1132,7 @@ class UseapiRunwayVideoToVideo:
         logger.info(f"{LOG} Runway Video-to-Video: model={model}, assetId={video_asset_id[:50]}...")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, f"Runway {model} video-to-video create")
+        data = _check_status(status, raw, url, f"Runway {model} video-to-video create", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1202,7 +1221,7 @@ class UseapiRunwayFramesGenerate:
         logger.info(f"{LOG} Runway Frames: num_images={num_images}, prompt='{text_prompt[:60]}'")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway Frames create")
+        data = _check_status(status, raw, url, "Runway Frames create", token)
 
         task_id = data.get("taskId", "") or data.get("task", {}).get("taskId", "")
         if not task_id:
@@ -1423,7 +1442,7 @@ class UseapiVeoVideoToGif:
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
-        data = _check_status(status, raw, url, "Veo video to GIF")
+        data = _check_status(status, raw, url, "Veo video to GIF", token)
         if pbar is not None:
             pbar.update_absolute(100, 100)
         encoded = data.get("encodedGif", "")
@@ -1510,7 +1529,7 @@ class UseapiVeoConcatenate:
         finally:
             if _done is not None:
                 _done.set(); _pt.join(timeout=1)
-        data = _check_status(status, raw, url, "Veo concatenate")
+        data = _check_status(status, raw, url, "Veo concatenate", token)
         if pbar is not None:
             pbar.update_absolute(100, 100)
         encoded = data.get("encodedVideo", "")
@@ -1587,7 +1606,7 @@ class UseapiRunwayImages:
         logger.info(f"{LOG} Runway Images: model={model}, prompt='{text_prompt[:60]}'")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway images create")
+        data = _check_status(status, raw, url, "Runway images create", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1648,7 +1667,7 @@ class UseapiRunwayGen4Upscale:
         logger.info(f"{LOG} Runway Gen4 Upscale: assetId={asset_id[:50]}...")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway gen4 upscale")
+        data = _check_status(status, raw, url, "Runway gen4 upscale", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1722,7 +1741,7 @@ class UseapiRunwayActTwo:
         )
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway act-two")
+        data = _check_status(status, raw, url, "Runway act-two", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1782,7 +1801,7 @@ class UseapiRunwayActTwoVoice:
         logger.info(f"{LOG} Runway Act Two Voice: video={video_asset_id[:40]}..., voiceId={voice_id}")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway act-two-voice")
+        data = _check_status(status, raw, url, "Runway act-two-voice", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1851,7 +1870,7 @@ class UseapiRunwayLipsync:
         logger.info(f"{LOG} Runway Lipsync: model_id={model_id}...")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway lipsync")
+        data = _check_status(status, raw, url, "Runway lipsync", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1904,7 +1923,7 @@ class UseapiRunwaySuperSlowMotion:
         logger.info(f"{LOG} Runway Super Slow Motion: assetId={asset_id[:50]}..., speed={speed}")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway super slow motion")
+        data = _check_status(status, raw, url, "Runway super slow motion", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
@@ -1949,7 +1968,7 @@ class UseapiRunwayTranscribe:
         logger.info(f"{LOG} Runway Transcribe: assetId={asset_id[:50]}..., language={language}")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "GET", headers, None, timeout=120)
-        data = _check_status(status, raw, url, "Runway transcribe")
+        data = _check_status(status, raw, url, "Runway transcribe", token)
         words = data.get("words", [])
         full_text = " ".join(w.get("text", "") for w in words)
         words_json = json.dumps(words)
@@ -2001,7 +2020,7 @@ class UseapiRunwayGen3TurboExtend:
         logger.info(f"{LOG} Runway Gen3 Turbo Extend: assetId={asset_id[:50]}...")
         headers = _auth_headers(token)
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=60)
-        data = _check_status(status, raw, url, "Runway gen3turbo extend")
+        data = _check_status(status, raw, url, "Runway gen3turbo extend", token)
 
         task_id = _extract_runway_task_id(data)
         if not task_id:
