@@ -36,6 +36,7 @@ EXPECTED_NODES = [
     "UseapiGoogleFlowUploadAsset",
     "UseapiGoogleFlowImageUpscale",
     "UseapiRunwayUploadAsset",
+    "UseapiRunwayUploadAudio",
     "UseapiRunwayGenerate",
     "UseapiRunwayVideoToVideo",
     "UseapiRunwayFramesGenerate",
@@ -97,7 +98,8 @@ class TestCategories(unittest.TestCase):
         "UseapiGoogleFlowImageUpscale",
     ]
     RUNWAY = [
-        "UseapiRunwayUploadAsset", "UseapiRunwayGenerate", "UseapiRunwayVideoToVideo",
+        "UseapiRunwayUploadAsset",
+        "UseapiRunwayUploadAudio", "UseapiRunwayGenerate", "UseapiRunwayVideoToVideo",
         "UseapiRunwayFramesGenerate", "UseapiRunwayImageUpscaler",
         "UseapiRunwayAleph", "UseapiRunwayGen3TurboExpand",
         "UseapiRunwayGen3TurboActOne",

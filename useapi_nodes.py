@@ -620,6 +620,43 @@ def _submit_with_progress(url: str, body: dict, token: str, estimated_secs: floa
     return data
 
 
+def _runway_upload_audio(token: str, audio_path: str,
+                         email: str = "", name: str = "comfyui_audio_upload") -> str:
+    """Upload a local audio file to Runway as a raw-binary audio asset. Returns assetId."""
+    if not _is_safe_path(audio_path):
+        raise ValueError(f"{LOG} Unsafe or absolute path detected: {audio_path}")
+    if not os.path.isfile(audio_path):
+        raise FileNotFoundError(f"{LOG} Audio file not found: {audio_path}")
+
+    ext = os.path.splitext(audio_path)[1].lower()
+    if ext == ".mp3":
+        content_type = "audio/mpeg"
+    elif ext == ".wav":
+        content_type = "audio/wav"
+    else:
+        # Default to mpeg for arbitrary audio types
+        content_type = "audio/mpeg"
+
+    with open(audio_path, "rb") as f:
+        audio_bytes = f.read()
+
+    params = {"name": name}
+    if email.strip():
+        params["email"] = email.strip()
+    url = f"{BASE_URL}/runwayml/assets?{urllib.parse.urlencode(params)}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": content_type}
+    logger.info(f"{LOG} Runway: uploading audio asset...")
+    status, raw = _make_request(url, "POST", headers, audio_bytes, timeout=_TIMEOUT_SHORT)
+    data = _check_status(status, raw, url, "Runway upload audio asset", token=token)
+    asset_id = data.get("assetId", "") or data.get("id", "")
+    if not asset_id:
+        raise RuntimeError(
+            f"{LOG} Runway upload: no assetId in response: "
+            f"{_redact_token(json.dumps(data), token)}"
+        )
+    logger.info(f"{LOG} Runway audio asset uploaded: {asset_id[:50]}...")
+    return asset_id
+
 def _runway_submit_and_poll(url: str, body: dict, token: str, context: str,
                             poll_interval: int, max_wait: int,
                             timeout: int = _TIMEOUT_SHORT):
@@ -1126,6 +1163,33 @@ class UseapiRunwayUploadAsset(_BaseNode):
         asset_id = _runway_upload_image(token, image, email)
         return (asset_id,)
 
+class UseapiRunwayUploadAudio(_BaseNode):
+    """Upload a local audio file to Runway for use in video generation.
+
+    Returns audio_asset_id needed by RunwayLipsync.
+    """
+
+    CATEGORY = "Useapi.net/Runway"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("asset_id",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio_path": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+            },
+        }
+
+    def execute(self, audio_path: str, api_token: str = "", email: str = ""):
+        token = _get_token(api_token)
+        asset_id = _runway_upload_audio(token, audio_path, email)
+        return (asset_id,)
 
 # ── Node 9: Runway Generate Video ────────────────────────────────────────────
 class UseapiRunwayGenerate(_BaseNode):
@@ -2437,6 +2501,7 @@ NODE_CLASS_MAPPINGS = {
     "UseapiGoogleFlowUploadAsset":    UseapiGoogleFlowUploadAsset,
     "UseapiGoogleFlowImageUpscale":   UseapiGoogleFlowImageUpscale,
     "UseapiRunwayUploadAsset":        UseapiRunwayUploadAsset,
+    "UseapiRunwayUploadAudio":        UseapiRunwayUploadAudio,
     "UseapiRunwayGenerate":           UseapiRunwayGenerate,
     "UseapiRunwayVideoToVideo":       UseapiRunwayVideoToVideo,
     "UseapiRunwayFramesGenerate":     UseapiRunwayFramesGenerate,
@@ -2467,6 +2532,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiGoogleFlowUploadAsset":    "Useapi Google Flow Upload Asset",
     "UseapiGoogleFlowImageUpscale":   "Useapi Google Flow Image Upscale",
     "UseapiRunwayUploadAsset":        "Useapi Runway Upload Asset",
+    "UseapiRunwayUploadAudio":        "Useapi Runway Upload Audio",
     "UseapiRunwayGenerate":           "Useapi Runway Generate Video",
     "UseapiRunwayVideoToVideo":       "Useapi Runway Video-to-Video",
     "UseapiRunwayFramesGenerate":     "Useapi Runway Frames Generate Image",
