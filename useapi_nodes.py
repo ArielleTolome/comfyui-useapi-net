@@ -1644,7 +1644,9 @@ class UseapiVeoConcatenate:
         for i, (mgid, (ts, te)) in enumerate(zip(ids, trims), start=1):
             if mgid.strip():
                 val = mgid.strip()
-                if val.startswith(("http://", "https://", "/", "\\")):
+                if val.startswith(("http://", "https://", "file://", "/", "\\")) or (
+                    len(val) >= 3 and val[1] in "::" and val[2] in "/\\"
+                ):
                     raise ValueError(
                         f"{LOG} Veo Concatenate: media_{i} contains a URL or file path instead of a "
                         f"mediaGenerationId. Connect the 'media_generation_id' output (not 'video_url' "
@@ -1660,7 +1662,7 @@ class UseapiVeoConcatenate:
             raise ValueError(f"{LOG} Veo Concatenate: at least 2 mediaGenerationIds required.")
         url = f"{BASE_URL}/google-flow/videos/concatenate"
         body = {"media": media_list}
-        for idx, item in enumerate(media_list):
+        for idx, item in enumerate(media_list, start=1):
             logger.info(f"{LOG} Veo Concatenate: media[{idx}].mediaGenerationId={item['mediaGenerationId']!r}")
         logger.info(f"{LOG} Veo Concatenate: {len(media_list)} videos...")
         data = _submit_with_progress(url, body, token, _ESTIMATED_SECS_VEO_CONCAT, _TIMEOUT_XLONG, "Veo concatenate")
