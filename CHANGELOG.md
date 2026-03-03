@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.0] - 2026-03-03
+## [0.5.0] - 2026-03-03
 
 ### Added
 - **3 New Runway Nodes**:
@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
   - `UseapiRunwayGen3TurboExpand`: Expand (outpaint) Gen3 Turbo videos to landscape or portrait.
   - `UseapiRunwayGen3TurboActOne`: Motion transfer from a driving video to a character using Gen3 Turbo Act One.
 - Updated tests to cover the 3 new nodes (structure, contract, and category validation).
+- Added `pyproject.toml` — ComfyUI now displays the pack as **UseAPI.net** instead of the folder name.
 
 ## [0.2.0] - 2026-02-25
 
