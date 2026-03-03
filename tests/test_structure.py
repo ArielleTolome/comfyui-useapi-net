@@ -41,6 +41,7 @@ EXPECTED_NODES = [
     "UseapiRunwayFramesGenerate",
     "UseapiRunwayImageUpscaler",
     "UseapiLoadVideoFrame",
+    "UseapiVideoToFrames",
     "UseapiPreviewVideo",
     "UseapiRunwayAleph",
     "UseapiRunwayGen3TurboExpand",
@@ -89,7 +90,7 @@ class TestComfyUIContract(unittest.TestCase):
 
 
 class TestCategories(unittest.TestCase):
-    UTILS = ["UseapiTokenFromEnv", "UseapiLoadVideoFrame", "UseapiPreviewVideo"]
+    UTILS = ["UseapiTokenFromEnv", "UseapiLoadVideoFrame", "UseapiVideoToFrames", "UseapiPreviewVideo"]
     GOOGLE_FLOW = [
         "UseapiVeoGenerate", "UseapiVeoUpscale", "UseapiVeoExtend",
         "UseapiGoogleFlowGenerateImage", "UseapiGoogleFlowUploadAsset",
