@@ -527,9 +527,10 @@ def _send_json(url: str, body: dict, token: str, timeout: int, context: str,
                captcha_retry: int = 3) -> dict:
     """Send a JSON POST request with optional reCAPTCHA retry. Returns parsed response dict."""
     headers = _auth_headers(token)
-    for attempt in range(max(1, captcha_retry)):
+    max_retries = max(0, int(captcha_retry))
+    for attempt in range(max_retries + 1):
         status, raw = _make_request(url, "POST", headers, json.dumps(body).encode(), timeout=timeout)
-        if attempt < captcha_retry - 1:
+        if attempt < max_retries:
             try:
                 _resp = json.loads(raw) if raw else {}
                 _err = _resp.get("error") if isinstance(_resp.get("error"), dict) else {}
@@ -538,7 +539,7 @@ def _send_json(url: str, body: dict, token: str, timeout: int, context: str,
                     wait_time = _RETRY_DELAY_RECAPTCHA * (2 ** attempt)
                     logger.info(
                         f"{LOG} {context}: reCAPTCHA 403, retrying "
-                        f"({attempt + 1}/{captcha_retry}) in {wait_time}s..."
+                        f"({attempt + 1}/{max_retries + 1}) in {wait_time}s..."
                     )
                     time.sleep(wait_time)
                     continue
@@ -547,7 +548,7 @@ def _send_json(url: str, body: dict, token: str, timeout: int, context: str,
                     wait_time = 15.0 * (2 ** attempt)
                     logger.info(
                         f"{LOG} {context}: 'All operations failed' (400), retrying "
-                        f"({attempt + 1}/{captcha_retry}) in {wait_time}s..."
+                        f"({attempt + 1}/{max_retries + 1}) in {wait_time}s..."
                     )
                     time.sleep(wait_time)
                     continue
