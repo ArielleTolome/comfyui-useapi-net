@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-03-03
+
+### Added
+- **Per-node timeout override** (`#50`): Optional `timeout` INT input (default `0` = use global config) on `UseapiVeoGenerate`, `UseapiVeoUpscale`, `UseapiVeoExtend`, `UseapiVeoConcatenate`, `UseapiRunwayGenerate`, `UseapiRunwayVideoToVideo`, and `UseapiRunwayFramesGenerate`. Set to any value >0 to override the global default for that specific node — useful for Veo 4K upscaling or other unusually long operations.
+- **`nodes_config.json` schema validation** (`#45`): `_load_config()` now validates global keys (`default_timeout`, `default_aspect_ratio`) for correct types, checks that node-specific keys are dicts, and uses `difflib` to suggest corrections for typos (e.g. `defualt_timeout` → `default_timeout`). Validation is non-fatal — warnings are logged and the plugin continues to load.
+
+### Fixed
+- **`UseapiVeoGenerate` model list**: Removed unsupported `veo-3` and `veo-2` from the model dropdown. The `/google-flow/videos` endpoint only supports `veo-3.1-fast`, `veo-3.1-quality`, and `veo-3.1-fast-relaxed`.
+- **`UseapiVeoGenerate` silent "All operations failed" with wrong image type**: Passing a raw image URL (e.g. a fife URL from `UseapiGoogleFlowGenerateImage`'s `image_url` output) to `start_image` or `end_image` caused a persistent 400 error. The API requires a `mediaGenerationId`, not a URL. These fields now raise a clear `ValueError` immediately when a URL is detected, with instructions to use `media_generation_id` or `start_image_tensor` instead.
+- **Improved "All operations failed" error hint**: Now explicitly mentions Google AI Ultra subscription requirement and multi-account email routing.
+
+### Tests
+- Integration tests updated for `UseapiRunwayFramesGenerate` and `UseapiVeoGenerate` timeout parameter.
+- Config validation tests added in `tests/test_validation.py`.
+
 ## [0.6.0] - 2026-03-03
 
 ### Added
