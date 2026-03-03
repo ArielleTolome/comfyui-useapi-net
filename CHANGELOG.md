@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-03-03
+
+### Added
+- **`UseapiRunwayUploadAudio` node** (`Useapi.net/Runway`): Upload MP3 or WAV audio files for use with Runway audio-to-video workflows. Returns `audio_asset_id`.
+- **IMAGE tensor inputs to `UseapiVeoGenerate`**: Optional `start_image` and `end_image` IMAGE tensor inputs with automatic upload via new `_google_flow_upload_image()` helper. Enables image-conditioned video generation.
+- **`audio_url` output on `UseapiRunwayGenerate`**: 4th return value `audio_url` (STRING) for workflows that need access to the generated audio URL. Falls back to empty string if not present.
+- **Automatic GitHub issue error reporting** (`error_reporter.py`): Unhandled exceptions are auto-reported as GitHub issues on the repository, with full traceback, node context, and git commit hash.
+
+### Tests
+- Added integration tests for `UseapiVideoToFrames` covering frame extraction and output tensor shape.
+
 ## [0.5.3] - 2026-03-03
 
 ### Fixed
