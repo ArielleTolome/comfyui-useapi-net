@@ -459,7 +459,7 @@ def _runway_poll(task_id: str, token: str,
 
 
 def _runway_frames_poll(task_id: str, token: str,
-                        poll_interval: int = 5, max_wait: int = 120,
+                        poll_interval: int = 5, max_wait: int = 600,
                         pbar=None) -> list:
     """Poll Runway Frames task via the shared tasks endpoint. Returns artifacts."""
     return _runway_poll(task_id, token, poll_interval=poll_interval,
@@ -1248,7 +1248,7 @@ class UseapiRunwayFramesGenerate:
                 "image_ref_2": ("IMAGE",),
                 "image_ref_3": ("IMAGE",),
                 "poll_interval": ("INT", {"default": 5, "min": 5, "max": 60}),
-                "max_wait": ("INT", {"default": 120, "min": 60, "max": 600}),
+                "max_wait": ("INT", {"default": 600, "min": 60, "max": 600}),
             },
         }
 
@@ -1256,7 +1256,7 @@ class UseapiRunwayFramesGenerate:
                 aspect_ratio: str = "16:9", style: str = "", diversity: int = 2,
                 num_images: str = "4", seed: int = 0, explore_mode: bool = True,
                 image_ref_1=None, image_ref_2=None, image_ref_3=None,
-                poll_interval: int = 5, max_wait: int = 120):
+                poll_interval: int = 5, max_wait: int = 600):
         token = _get_token(api_token)
 
         # Auto-upload reference images
