@@ -1109,13 +1109,15 @@ class UseapiRunwayGenerate(_BaseNode):
     Async: creates a task, polls until SUCCEEDED.
     If image input provided without asset_id, auto-uploads the image first.
     Gen-4/Gen-4 Turbo require firstImage_assetId. Gen-3 Turbo supports text-to-video.
+    The output 'audio_url' may contain an audio URL if the API returns audio alongside the video (e.g. for gen4_5).
+    Otherwise, it will be an empty string.
     """
 
     CATEGORY = "Useapi.net/Runway"
     FUNCTION = "execute"
     OUTPUT_NODE = True
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("video_url", "video_path", "task_id")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id", "audio_url")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1179,8 +1181,9 @@ class UseapiRunwayGenerate(_BaseNode):
         logger.info(f"{LOG} Runway Generate: model={model}, {seconds}s, prompt='{text_prompt[:60]}'")
         artifacts, task_id = _runway_submit_and_poll(url, body, token, f"Runway {model} create", poll_interval, max_wait)
         video_url = artifacts[0]["url"]
+        audio_url = artifacts[0].get("audioUrl", "")
         video_path = _download_file(video_url, ".mp4")
-        return (video_url, video_path, task_id)
+        return (video_url, video_path, task_id, audio_url)
 
 
 # ── Node 10: Runway Video-to-Video ────────────────────────────────────────────
