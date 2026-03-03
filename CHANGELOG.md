@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-03-03
+
+### Added
+- **`UseapiVideoToFrames` node** (`Useapi.net/Utils`): Decodes any UseAPI video output (`video_path`) into a ComfyUI `IMAGE` tensor batch compatible with `VHS_VideoCombine` and native `SaveVideo` nodes. Also shows an in-node video preview. Outputs: `frames` (IMAGE), `frame_count` (INT), `fps` (FLOAT). Requires `opencv-python`.
+
 ## [0.5.0] - 2026-03-03
 
 ### Added
