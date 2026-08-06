@@ -1712,6 +1712,153 @@ class UseapiFaceswapChangeBG(core._BaseNode):
         return (tensor, img_url, jobid)
 
 
+
+class UseapiMurekaAdvanced(core._BaseNode):
+    """Create Mureka song with custom lyrics (+ optional style/vocal/ref)."""
+
+    CATEGORY = "Useapi.net/Mureka"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("audio_url_1", "audio_path_1", "audio_url_2", "audio_path_2", "job_id", "song_ids", "record_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lyrics": ("STRING", {"multiline": True, "default": ""}),
+                "model": (["V9", "V8", "O2", "V7.6", "V7.5"], {"default": "V9"}),
+            },
+            "optional": {
+                "title": ("STRING", {"default": ""}),
+                "desc": ("STRING", {"default": "", "tooltip": "comma genres/moods/vocals"}),
+                "vocal_id": ("STRING", {"default": ""}),
+                "ref_id": ("STRING", {"default": ""}),
+                "motif_id": ("STRING", {"default": ""}),
+                "vocal_gender": (["", "female", "male"], {"default": ""}),
+                "account": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(
+        self,
+        lyrics: str,
+        model: str = "V9",
+        title: str = "",
+        desc: str = "",
+        vocal_id: str = "",
+        ref_id: str = "",
+        motif_id: str = "",
+        vocal_gender: str = "",
+        account: str = "",
+        api_token: str = "",
+        timeout: int = 300,
+    ):
+        token = core._get_token(api_token)
+        ly = (lyrics or "").strip()
+        if not ly:
+            raise ValueError(f"{LOG} lyrics is required")
+        body = {"lyrics": ly, "model": model}
+        if title.strip():
+            body["title"] = title.strip()
+        if desc.strip():
+            body["desc"] = desc.strip()
+        if vocal_id.strip():
+            body["vocal_id"] = vocal_id.strip()
+        if ref_id.strip():
+            body["ref_id"] = ref_id.strip()
+        if motif_id.strip():
+            body["motif_id"] = motif_id.strip()
+        if vocal_gender.strip():
+            body["vocal_gender"] = vocal_gender.strip()
+        if account.strip():
+            body["account"] = account.strip()
+        logger.info(f"{LOG} Mureka advanced model={model}")
+        return _mureka_create_and_poll(token, "/mureka/music/create-advanced", body, timeout, "Mureka advanced")
+
+
+class UseapiFaceswapInswapper(core._BaseNode):
+    """InsightFaceSwap INSwapper on a Discord message attachment (by message id)."""
+
+    CATEGORY = "Useapi.net/FaceSwap"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_url", "job_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target_message_id": ("STRING", {"default": "", "tooltip": "Discord message id with attached image"}),
+            },
+            "optional": {
+                "channel": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 180, "min": 30, "max": 900}),
+            },
+        }
+
+    def execute(
+        self,
+        target_message_id: str,
+        channel: str = "",
+        api_token: str = "",
+        timeout: int = 180,
+    ):
+        token = core._get_token(api_token)
+        mid = (target_message_id or "").strip()
+        if not mid:
+            raise ValueError(f"{LOG} target_message_id is required")
+        fields = {"targetMessageId": mid}
+        if channel.strip():
+            fields["channel"] = channel.strip()
+        files = {}
+        body, ctype = _multipart_encode(fields, files)
+        url = f"{BASE_URL}/faceswap/inswapper"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": ctype, "Accept": "application/json"}
+        status, raw = core._make_request(url, "POST", headers, body, timeout=timeout)
+        data = core._check_status(status, raw, url, "FaceSwap inswapper", token)
+        jobid = str(data.get("jobid") or "")
+        st = str(data.get("status") or "").lower()
+        if st in ("started", "pending", "") and jobid:
+            import time as _time
+            poll2 = f"{BASE_URL}/faceswap/{urllib.parse.quote(jobid, safe='')}"
+            poll = f"{BASE_URL}/faceswap/jobs/?jobid={urllib.parse.quote(jobid, safe='')}"
+            start = _time.time()
+            while _time.time() - start < timeout:
+                for pu in (poll2, poll):
+                    try:
+                        stt, body2 = core._make_request(pu, "GET", core._auth_headers(token), None, timeout=30)
+                        if stt == 200:
+                            data = json.loads(body2.decode("utf-8") if isinstance(body2, (bytes, bytearray)) else body2)
+                            if str(data.get("status") or "").lower() in ("completed", "failed"):
+                                break
+                    except Exception:
+                        continue
+                else:
+                    _time.sleep(3)
+                    continue
+                if str(data.get("status") or "").lower() in ("completed", "failed"):
+                    break
+                _time.sleep(3)
+            if str(data.get("status") or "").lower() == "failed":
+                raise RuntimeError(f"{LOG} FaceSwap inswapper failed: {data.get('error') or data}")
+        attachments = data.get("attachments") or []
+        if not attachments:
+            raise RuntimeError(f"{LOG} FaceSwap inswapper: no attachments in {data}")
+        img_url = attachments[0].get("url") or attachments[0].get("proxy_url") or ""
+        if not img_url:
+            raise RuntimeError(f"{LOG} FaceSwap inswapper: empty attachment url")
+        img_path = core._download_file(img_url, ".png")
+        with open(img_path, "rb") as f:
+            tensor = core._bytes_to_tensor(f.read())
+        logger.info(f"{LOG} FaceSwap inswapper complete job={jobid}")
+        return (tensor, img_url, jobid)
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
@@ -1731,8 +1878,10 @@ NODE_CLASS_MAPPINGS = {
     "UseapiMurekaInstrumental": UseapiMurekaInstrumental,
     "UseapiMurekaExtend": UseapiMurekaExtend,
     "UseapiMurekaRegenerate": UseapiMurekaRegenerate,
+    "UseapiMurekaAdvanced": UseapiMurekaAdvanced,
     "UseapiFaceswapPicsi": UseapiFaceswapPicsi,
     "UseapiFaceswapChangeBG": UseapiFaceswapChangeBG,
+    "UseapiFaceswapInswapper": UseapiFaceswapInswapper,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1754,6 +1903,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiMurekaInstrumental": "Useapi Mureka Instrumental",
     "UseapiMurekaExtend": "Useapi Mureka Extend",
     "UseapiMurekaRegenerate": "Useapi Mureka Regenerate",
+    "UseapiMurekaAdvanced": "Useapi Mureka Create Advanced",
     "UseapiFaceswapPicsi": "Useapi FaceSwap Picsi",
     "UseapiFaceswapChangeBG": "Useapi FaceSwap Change Background",
+    "UseapiFaceswapInswapper": "Useapi FaceSwap INSwapper",
 }

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2026-08-06
+
+### Added
+- **UseapiMurekaAdvanced** — custom lyrics + style/vocal/ref
+- **UseapiFaceswapInswapper** — INSwapper via Discord message id
+
+### Note
+Creative generation surface for Meta/media workflows is complete.
+Account CRUD UIs intentionally out of scope for Comfy node packs.
+
 ## [0.16.0] - 2026-08-06
 
 ### Added
