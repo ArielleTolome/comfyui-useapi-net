@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-08-06
+
+### Added
+- **UseapiKlingUploadAsset** — upload image/video/audio to Kling assets
+- **UseapiKlingImage2Video** — image2video-frames (v3/turbo/2.x)
+- **UseapiKlingLipsync** — video+audio lipsync
+- **UseapiKlingMotionCreate** — motion-control (v3.0 / v2.6)
+
 ## [0.10.0] - 2026-08-06
 
 ### Added

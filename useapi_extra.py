@@ -1,4 +1,4 @@
-"""Extra UseAPI.net nodes — PixVerse images + MiniMax file upload.
+"""Extra UseAPI.net nodes — PixVerse, MiniMax, Kling I2V/lipsync/motion.
 
 Kept separate from useapi_nodes.py to avoid merge thrash on the large core file.
 """
@@ -37,6 +37,68 @@ def _tensor_to_png_bytes(image: torch.Tensor) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+
+
+def _kling_upload_asset(token: str, data: bytes, content_type: str, email: str = "") -> str:
+    """Upload bytes to Kling assets; return usable URL (url/resourceUrl) or fileName."""
+    qs = ""
+    if email.strip():
+        qs = "?" + urllib.parse.urlencode({"email": email.strip()})
+    url = f"{BASE_URL}/kling/assets/{qs}" if qs else f"{BASE_URL}/kling/assets/"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": content_type}
+    status, body = core._make_request(url, "POST", headers, data, timeout=180)
+    resp = core._check_status(status, body, url, "Kling asset upload", token)
+    asset_url = (
+        resp.get("url")
+        or resp.get("resourceUrl")
+        or resp.get("resource_url")
+        or ""
+    )
+    file_name = resp.get("fileName") or resp.get("file_name") or ""
+    if not asset_url and file_name:
+        # resolve via GET assets/uploaded
+        get_url = f"{BASE_URL}/kling/assets/uploaded/?fileName={urllib.parse.quote(file_name)}"
+        if email.strip():
+            get_url += f"&email={urllib.parse.quote(email.strip())}"
+        st2, b2 = core._make_request(get_url, "GET", {"Authorization": f"Bearer {token}"}, None, 60)
+        det = core._check_status(st2, b2, get_url, "Kling asset resolve", token)
+        asset_url = (
+            det.get("url")
+            or det.get("resourceUrl")
+            or det.get("resource_url")
+            or (det.get("asset") or {}).get("url")
+            or ""
+        )
+        if not asset_url and isinstance(det.get("items"), list) and det["items"]:
+            item = det["items"][0]
+            if isinstance(item, dict):
+                asset_url = item.get("url") or item.get("resourceUrl") or ""
+    if not asset_url:
+        # last resort: some flows accept fileName
+        if file_name:
+            logger.warning(f"{LOG} Kling upload: no URL in response; returning fileName={file_name}")
+            return file_name
+        raise RuntimeError(f"{LOG} Kling upload: no url/resourceUrl/fileName in {resp}")
+    return asset_url
+
+
+def _kling_create_and_poll(token: str, path: str, body: dict, timeout: int, context: str):
+    url = f"{BASE_URL}{path}"
+    status, raw = core._make_request(
+        url, "POST", core._auth_headers(token),
+        json.dumps(body).encode("utf-8"), timeout=min(timeout, 120),
+    )
+    data = core._check_status(status, raw, url, context, token)
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    task_id = str(task.get("id") or data.get("task_id") or data.get("id") or "")
+    if not task_id:
+        raise RuntimeError(f"{LOG} {context}: no task id in {data}")
+    poll_url = f"{BASE_URL}/kling/tasks/{urllib.parse.quote(str(task_id), safe='')}"
+    video_url, _pdata = _poll_until_video_url(
+        poll_url=poll_url, token=token, timeout=timeout, context=f"{context} poll"
+    )
+    video_path = core._download_file(video_url, ".mp4")
+    return video_url, video_path, str(task_id)
 
 class UseapiMinimaxUploadFile(core._BaseNode):
     """Upload an image to MiniMax (Hailuo) via UseAPI for use as fileID in video jobs."""
@@ -487,11 +549,270 @@ class UseapiPixverseGenerateVideo(core._BaseNode):
         return (video_url, video_path, str(video_id))
 
 
+
+class UseapiKlingUploadAsset(core._BaseNode):
+    """Upload IMAGE / local video path / audio path to Kling assets."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("asset_url", "file_name")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "image": ("IMAGE",),
+                "video_path": ("STRING", {"default": "", "tooltip": "Local mp4 path or empty"}),
+                "audio_path": ("STRING", {"default": "", "tooltip": "Local mp3/wav path or empty"}),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+            },
+        }
+
+    def execute(self, image=None, video_path: str = "", audio_path: str = "",
+                api_token: str = "", email: str = ""):
+        token = core._get_token(api_token)
+        if image is not None:
+            data = _tensor_to_png_bytes(image)
+            ctype = "image/png"
+        elif video_path.strip():
+            path = video_path.strip()
+            if not core._is_safe_path(path):
+                raise ValueError(f"{LOG} unsafe video_path rejected")
+            with open(path, "rb") as f:
+                data = f.read()
+            ctype = "video/mp4"
+        elif audio_path.strip():
+            path = audio_path.strip()
+            if not core._is_safe_path(path):
+                raise ValueError(f"{LOG} unsafe audio_path rejected")
+            with open(path, "rb") as f:
+                data = f.read()
+            lower = path.lower()
+            if lower.endswith(".wav"):
+                ctype = "audio/wav"
+            elif lower.endswith(".mp3"):
+                ctype = "audio/mpeg"
+            else:
+                ctype = "audio/mpeg"
+        else:
+            raise ValueError(f"{LOG} Provide image, video_path, or audio_path")
+        url = _kling_upload_asset(token, data, ctype, email)
+        # file_name best-effort from URL
+        file_name = url.rsplit("/", 1)[-1] if "/" in url else url
+        logger.info(f"{LOG} Kling asset uploaded: {url[:80]}")
+        return (url, file_name)
+
+
+class UseapiKlingImage2Video(core._BaseNode):
+    """Kling image2video-frames (start/end frame). Uploads IMAGE tensors automatically."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        models = [
+            "kling-v3-0",
+            "kling-v3-0-turbo",
+            "kling-v2-6",
+            "kling-v2-5",
+            "kling-v2-1",
+            "kling-v2-1-master",
+            "kling-v1-6",
+            "kling-v1-5",
+        ]
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model_name": (models, {"default": "kling-v3-0-turbo"}),
+                "mode": (["std", "pro", "4k"], {"default": "pro"}),
+                "duration": ("INT", {"default": 5, "min": 3, "max": 15}),
+            },
+            "optional": {
+                "image_tail": ("IMAGE",),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "enable_audio": ("BOOLEAN", {"default": True}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        image,
+        prompt: str,
+        model_name: str,
+        mode: str = "pro",
+        duration: int = 5,
+        image_tail=None,
+        api_token: str = "",
+        email: str = "",
+        enable_audio: bool = True,
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        start_url = _kling_upload_asset(token, _tensor_to_png_bytes(image), "image/png", email)
+        body = {
+            "image": start_url,
+            "prompt": prompt,
+            "model_name": model_name,
+            "mode": mode,
+            "duration": str(int(duration)),
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        if image_tail is not None and model_name not in ("kling-v3-0-turbo", "kling-v2-1-master"):
+            body["image_tail"] = _kling_upload_asset(
+                token, _tensor_to_png_bytes(image_tail), "image/png", email
+            )
+        if model_name not in ("kling-v3-0-turbo",):
+            body["enable_audio"] = bool(enable_audio)
+        logger.info(f"{LOG} Kling I2V model={model_name} mode={mode}")
+        return _kling_create_and_poll(
+            token, "/kling/videos/image2video-frames", body, timeout, "Kling I2V"
+        )
+
+
+class UseapiKlingLipsync(core._BaseNode):
+    """Apply Kling lip-sync to a video using an audio track (URLs or local paths)."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("STRING", {"default": "", "tooltip": "Video URL or local path"}),
+                "audio": ("STRING", {"default": "", "tooltip": "Audio URL or local path"}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(self, video: str, audio: str, api_token: str = "", email: str = "", timeout: int = 900):
+        token = core._get_token(api_token)
+
+        def _resolve(val: str, kind: str) -> str:
+            v = (val or "").strip()
+            if not v:
+                raise ValueError(f"{LOG} {kind} is required")
+            if v.startswith("http://") or v.startswith("https://"):
+                return v
+            if not core._is_safe_path(v):
+                raise ValueError(f"{LOG} unsafe {kind} path")
+            with open(v, "rb") as f:
+                data = f.read()
+            if kind == "video":
+                ctype = "video/mp4"
+            else:
+                ctype = "audio/mpeg" if v.lower().endswith(".mp3") else "audio/wav"
+            return _kling_upload_asset(token, data, ctype, email)
+
+        body = {
+            "video": _resolve(video, "video"),
+            "audio": _resolve(audio, "audio"),
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        logger.info(f"{LOG} Kling lipsync start")
+        return _kling_create_and_poll(token, "/kling/videos/lipsync", body, timeout, "Kling lipsync")
+
+
+class UseapiKlingMotionCreate(core._BaseNode):
+    """Apply motion from a reference video onto a person image (Kling motion-control)."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "motion": ("STRING", {"default": "", "tooltip": "Motion video URL or local path"}),
+                "model_name": (["kling-v3-0", "kling-v2-6"], {"default": "kling-v3-0"}),
+                "mode": (["std", "pro"], {"default": "std"}),
+            },
+            "optional": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "keep_audio": ("BOOLEAN", {"default": False}),
+                "motion_direction": (["motion_direction", "image_direction"], {"default": "motion_direction"}),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        image,
+        motion: str,
+        model_name: str = "kling-v3-0",
+        mode: str = "std",
+        prompt: str = "",
+        keep_audio: bool = False,
+        motion_direction: str = "motion_direction",
+        api_token: str = "",
+        email: str = "",
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        image_url = _kling_upload_asset(token, _tensor_to_png_bytes(image), "image/png", email)
+        m = (motion or "").strip()
+        if not m:
+            raise ValueError(f"{LOG} motion is required")
+        if m.startswith("http://") or m.startswith("https://"):
+            motion_url = m
+        else:
+            if not core._is_safe_path(m):
+                raise ValueError(f"{LOG} unsafe motion path")
+            with open(m, "rb") as f:
+                data = f.read()
+            motion_url = _kling_upload_asset(token, data, "video/mp4", email)
+        body = {
+            "model_name": model_name,
+            "imageUrl": image_url,
+            "motionUrl": motion_url,
+            "mode": mode,
+            "keepAudio": bool(keep_audio),
+            "motionDirection": motion_direction,
+        }
+        if prompt.strip():
+            body["prompt"] = prompt.strip()
+        if email.strip():
+            body["email"] = email.strip()
+        logger.info(f"{LOG} Kling motion-create model={model_name}")
+        return _kling_create_and_poll(
+            token, "/kling/videos/motion-create", body, timeout, "Kling motion"
+        )
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
     "UseapiKlingText2Video": UseapiKlingText2Video,
     "UseapiPixverseGenerateVideo": UseapiPixverseGenerateVideo,
+    "UseapiKlingUploadAsset": UseapiKlingUploadAsset,
+    "UseapiKlingImage2Video": UseapiKlingImage2Video,
+    "UseapiKlingLipsync": UseapiKlingLipsync,
+    "UseapiKlingMotionCreate": UseapiKlingMotionCreate,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -499,4 +820,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiPixverseGenerateImage": "Useapi PixVerse Generate Image",
     "UseapiKlingText2Video": "Useapi Kling Text-to-Video",
     "UseapiPixverseGenerateVideo": "Useapi PixVerse Generate Video",
+    "UseapiKlingUploadAsset": "Useapi Kling Upload Asset",
+    "UseapiKlingImage2Video": "Useapi Kling Image-to-Video",
+    "UseapiKlingLipsync": "Useapi Kling Lipsync",
+    "UseapiKlingMotionCreate": "Useapi Kling Motion Control",
 }
