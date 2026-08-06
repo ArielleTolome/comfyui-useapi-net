@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-08-06
+
+### Added
+- **`UseapiPixverseGenerateImage`** — PixVerse v2 images (Seedream 5, Nano Banana 2 Lite/Pro, Kling image, GPT Image 2.0, Qwen, …)
+- **`UseapiMinimaxUploadFile`** — upload IMAGE tensors to MiniMax for `fileID` use in H3/Seedance video nodes
+
 ## [0.8.0] - 2026-08-06
 
 ### Added
