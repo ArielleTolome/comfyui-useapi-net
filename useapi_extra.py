@@ -1272,6 +1272,207 @@ class UseapiPixverseExtend(core._BaseNode):
         return _pixverse_create_and_poll(token, "/pixverse/videos/extend", body, timeout, "PixVerse extend")
 
 
+
+def _multipart_encode(fields: dict, files: dict) -> tuple[bytes, str]:
+    """Encode multipart/form-data. files: name -> (filename, bytes, content_type)."""
+    import uuid
+    boundary = f"----HermesBoundary{uuid.uuid4().hex}"
+    lines: list[bytes] = []
+    for name, value in fields.items():
+        if value is None or value == "":
+            continue
+        lines.append(f"--{boundary}\r\n".encode())
+        lines.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        lines.append(str(value).encode("utf-8"))
+        lines.append(b"\r\n")
+    for name, (filename, data, ctype) in files.items():
+        lines.append(f"--{boundary}\r\n".encode())
+        lines.append(
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode()
+        )
+        lines.append(f"Content-Type: {ctype}\r\n\r\n".encode())
+        lines.append(data)
+        lines.append(b"\r\n")
+    lines.append(f"--{boundary}--\r\n".encode())
+    return b"".join(lines), f"multipart/form-data; boundary={boundary}"
+
+
+class UseapiMurekaCreate(core._BaseNode):
+    """Create a Mureka song (async poll). Returns two track paths + covers."""
+
+    CATEGORY = "Useapi.net/Mureka"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("audio_url_1", "audio_path_1", "audio_url_2", "audio_path_2", "job_id", "record_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model": (["V9", "V8", "O2", "V7.6"], {"default": "V9"}),
+            },
+            "optional": {
+                "account": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, prompt: str, model: str = "V9", account: str = "",
+                api_token: str = "", timeout: int = 300):
+        token = core._get_token(api_token)
+        body = {"prompt": prompt, "model": model, "async": True}
+        if account.strip():
+            body["account"] = account.strip()
+        url = f"{BASE_URL}/mureka/music/create"
+        status, raw = core._make_request(
+            url, "POST", core._auth_headers(token),
+            json.dumps(body).encode("utf-8"), timeout=60,
+        )
+        # 201 async or 200 sync
+        if status not in (200, 201):
+            data = core._check_status(status, raw, url, "Mureka create", token)
+        else:
+            try:
+                data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+            except Exception as exc:
+                raise RuntimeError(f"{LOG} Mureka bad JSON: {exc}") from exc
+            if data.get("error"):
+                raise RuntimeError(f"{LOG} Mureka error: {data.get('error')}")
+
+        # Sync 200 with songs
+        songs = data.get("songs") or []
+        jobid = data.get("jobid") or ""
+        if not songs and jobid:
+            # poll
+            poll = f"{BASE_URL}/mureka/jobs/{urllib.parse.quote(jobid, safe='')}"
+            import time as _time
+            start = _time.time()
+            while _time.time() - start < timeout:
+                st, body2 = core._make_request(poll, "GET", core._auth_headers(token), None, timeout=30)
+                job = core._check_status(st, body2, poll, "Mureka job", token)
+                status_name = str(job.get("status") or "").lower()
+                if status_name == "completed":
+                    resp = job.get("response") or {}
+                    songs = resp.get("songs") or []
+                    data = job
+                    break
+                if status_name == "failed":
+                    raise RuntimeError(f"{LOG} Mureka job failed: {job.get('error') or job}")
+                _time.sleep(5)
+            else:
+                raise TimeoutError(f"{LOG} Mureka job timed out after {timeout}s")
+
+        if len(songs) < 1:
+            raise RuntimeError(f"{LOG} Mureka: no songs in response {data}")
+        def _one(song):
+            u = song.get("mp3_url") or ""
+            if not u:
+                raise RuntimeError(f"{LOG} song missing mp3_url")
+            path = core._download_file(u, ".mp3")
+            return u, path
+        u1, p1 = _one(songs[0])
+        if len(songs) > 1:
+            u2, p2 = _one(songs[1])
+        else:
+            u2, p2 = u1, p1
+        logger.info(f"{LOG} Mureka complete job={jobid}")
+        return (u1, p1, u2, p2, str(jobid), json.dumps(data, ensure_ascii=False)[:50000])
+
+
+class UseapiFaceswapPicsi(core._BaseNode):
+    """InsightFaceSwap /picsi — morph source face onto target image."""
+
+    CATEGORY = "Useapi.net/FaceSwap"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_url", "job_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_image": ("IMAGE",),
+                "target_image": ("IMAGE",),
+            },
+            "optional": {
+                "options": ("STRING", {"default": ""}),
+                "channel": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 180, "min": 30, "max": 900}),
+            },
+        }
+
+    def execute(
+        self,
+        source_image,
+        target_image,
+        options: str = "",
+        channel: str = "",
+        api_token: str = "",
+        timeout: int = 180,
+    ):
+        token = core._get_token(api_token)
+        src = _tensor_to_png_bytes(source_image)
+        tgt = _tensor_to_png_bytes(target_image)
+        fields = {}
+        if options.strip():
+            fields["options"] = options.strip()
+        if channel.strip():
+            fields["channel"] = channel.strip()
+        files = {
+            "source_image": ("source.png", src, "image/png"),
+            "target_image_gif_or_video": ("target.png", tgt, "image/png"),
+        }
+        body, ctype = _multipart_encode(fields, files)
+        url = f"{BASE_URL}/faceswap/picsi"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": ctype, "Accept": "application/json"}
+        status, raw = core._make_request(url, "POST", headers, body, timeout=timeout)
+        data = core._check_status(status, raw, url, "FaceSwap picsi", token)
+        jobid = str(data.get("jobid") or "")
+        st = str(data.get("status") or "").lower()
+        if st == "started" and jobid:
+            # poll job
+            import time as _time
+            poll = f"{BASE_URL}/faceswap/jobs/?jobid={urllib.parse.quote(jobid, safe='')}"
+            # docs also have get-faceswap-jobid
+            poll2 = f"{BASE_URL}/faceswap/{urllib.parse.quote(jobid, safe='')}"
+            start = _time.time()
+            while _time.time() - start < timeout:
+                for pu in (poll2, poll):
+                    try:
+                        stt, body2 = core._make_request(pu, "GET", core._auth_headers(token), None, timeout=30)
+                        if stt == 200:
+                            data = json.loads(body2.decode("utf-8") if isinstance(body2, (bytes, bytearray)) else body2)
+                            if str(data.get("status") or "").lower() in ("completed", "failed"):
+                                break
+                    except Exception:
+                        continue
+                else:
+                    _time.sleep(3)
+                    continue
+                if str(data.get("status") or "").lower() in ("completed", "failed"):
+                    break
+                _time.sleep(3)
+            if str(data.get("status") or "").lower() == "failed":
+                raise RuntimeError(f"{LOG} FaceSwap failed: {data.get('error') or data}")
+
+        attachments = data.get("attachments") or []
+        if not attachments:
+            raise RuntimeError(f"{LOG} FaceSwap: no attachments in {data}")
+        img_url = attachments[0].get("url") or attachments[0].get("proxy_url") or ""
+        if not img_url:
+            raise RuntimeError(f"{LOG} FaceSwap: empty attachment url")
+        img_path = core._download_file(img_url, ".png")
+        with open(img_path, "rb") as f:
+            tensor = core._bytes_to_tensor(f.read())
+        logger.info(f"{LOG} FaceSwap picsi complete job={jobid}")
+        return (tensor, img_url, jobid)
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
@@ -1287,6 +1488,8 @@ NODE_CLASS_MAPPINGS = {
     "UseapiPixverseLipsync": UseapiPixverseLipsync,
     "UseapiPixverseMotionControl": UseapiPixverseMotionControl,
     "UseapiPixverseExtend": UseapiPixverseExtend,
+    "UseapiMurekaCreate": UseapiMurekaCreate,
+    "UseapiFaceswapPicsi": UseapiFaceswapPicsi,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1304,4 +1507,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiPixverseLipsync": "Useapi PixVerse Lipsync",
     "UseapiPixverseMotionControl": "Useapi PixVerse Motion Control",
     "UseapiPixverseExtend": "Useapi PixVerse Extend Video",
+    "UseapiMurekaCreate": "Useapi Mureka Create Song",
+    "UseapiFaceswapPicsi": "Useapi FaceSwap Picsi",
 }

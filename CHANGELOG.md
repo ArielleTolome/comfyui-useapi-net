@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-08-06
+
+### Added
+- **UseapiMurekaCreate** — Mureka song create (async poll, dual tracks)
+- **UseapiFaceswapPicsi** — InsightFaceSwap /picsi face morph
+
 ## [0.13.0] - 2026-08-06
 
 ### Added
