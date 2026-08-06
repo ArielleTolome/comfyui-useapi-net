@@ -804,6 +804,189 @@ class UseapiKlingMotionCreate(core._BaseNode):
         )
 
 
+
+class UseapiKlingTTS(core._BaseNode):
+    """Free Kling TTS — text to speech (up to 5 minutes). Returns audio URL + local path."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "AUDIO")
+    RETURN_NAMES = ("audio_url", "audio_path", "audio")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+                "speaker_id": ("STRING", {"default": "", "tooltip": "From GET /kling/tts/voices"}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.8, "max": 2.0, "step": 0.05}),
+                "emotion": (
+                    ["neutral", "happy", "angry", "sad", "fearful", "disgusted", "surprised"],
+                    {"default": "neutral"},
+                ),
+            },
+        }
+
+    def execute(
+        self,
+        text: str,
+        speaker_id: str,
+        api_token: str = "",
+        email: str = "",
+        speed: float = 1.0,
+        emotion: str = "neutral",
+    ):
+        token = core._get_token(api_token)
+        if not (text or "").strip():
+            raise ValueError(f"{LOG} text is required")
+        if not (speaker_id or "").strip():
+            raise ValueError(f"{LOG} speaker_id is required (GET /kling/tts/voices)")
+        body = {
+            "speakerId": speaker_id.strip(),
+            "text": text.strip(),
+            "speed": float(speed),
+            "emotion": emotion,
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        url = f"{BASE_URL}/kling/tts/create"
+        status, raw = core._make_request(
+            url, "POST", core._auth_headers(token),
+            json.dumps(body).encode("utf-8"), timeout=180,
+        )
+        data = core._check_status(status, raw, url, "Kling TTS", token)
+        audio_url = data.get("resource") or data.get("url") or data.get("audio_url") or ""
+        if not audio_url:
+            raise RuntimeError(f"{LOG} Kling TTS: no resource URL in {data}")
+        audio_path = core._download_file(audio_url, ".mp3")
+        # build AUDIO for ComfyUI
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+        # reuse runway-style path if available; simple torch audio via torchaudio optional
+        try:
+            import torchaudio
+            waveform, sr = torchaudio.load(audio_path)
+            if waveform.ndim == 1:
+                waveform = waveform.unsqueeze(0)
+            if waveform.ndim == 2:
+                waveform = waveform.unsqueeze(0)
+            audio = {"waveform": waveform, "sample_rate": int(sr)}
+        except Exception:
+            # fallback silent short buffer if torchaudio missing
+            import torch as _torch
+            audio = {"waveform": _torch.zeros((1, 1, 16000)), "sample_rate": 16000}
+            logger.warning(f"{LOG} torchaudio unavailable; AUDIO tensor is placeholder. Use audio_path.")
+        logger.info(f"{LOG} Kling TTS complete: {audio_url[:80]}")
+        return (audio_url, audio_path, audio)
+
+
+class UseapiKlingAvatarVideo(core._BaseNode):
+    """Kling Avatars 2.0 — lip-sync talking head from image/avatar + audio or TTS text."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mode": (["std", "pro"], {"default": "std"}),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "image_url": ("STRING", {"default": ""}),
+                "avatar_id": ("STRING", {"default": ""}),
+                "audio_url": ("STRING", {"default": ""}),
+                "audio_path": ("STRING", {"default": ""}),
+                "text": ("STRING", {"multiline": True, "default": ""}),
+                "speaker_id": ("STRING", {"default": ""}),
+                "prompt": ("STRING", {"multiline": True, "default": "Natural speaking"}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.8, "max": 2.0, "step": 0.05}),
+                "emotion": (
+                    ["neutral", "happy", "angry", "sad", "fearful", "disgusted", "surprised"],
+                    {"default": "neutral"},
+                ),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        mode: str = "std",
+        image=None,
+        image_url: str = "",
+        avatar_id: str = "",
+        audio_url: str = "",
+        audio_path: str = "",
+        text: str = "",
+        speaker_id: str = "",
+        prompt: str = "Natural speaking",
+        speed: float = 1.0,
+        emotion: str = "neutral",
+        api_token: str = "",
+        email: str = "",
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        body: dict = {"mode": mode}
+        if email.strip():
+            body["email"] = email.strip()
+        if prompt.strip():
+            body["prompt"] = prompt.strip()
+
+        # avatar source
+        av = (avatar_id or "").strip()
+        iu = (image_url or "").strip()
+        if av:
+            body["avatarId"] = av
+        elif iu:
+            body["imageUrl"] = iu
+        elif image is not None:
+            body["imageUrl"] = _kling_upload_asset(
+                token, _tensor_to_png_bytes(image), "image/png", email
+            )
+        else:
+            raise ValueError(f"{LOG} Provide avatar_id, image_url, or image")
+
+        # audio source
+        au = (audio_url or "").strip()
+        ap = (audio_path or "").strip()
+        tx = (text or "").strip()
+        if au:
+            body["audioUrl"] = au
+        elif ap:
+            if not core._is_safe_path(ap):
+                raise ValueError(f"{LOG} unsafe audio_path")
+            with open(ap, "rb") as f:
+                data = f.read()
+            ctype = "audio/mpeg" if ap.lower().endswith(".mp3") else "audio/wav"
+            body["audioUrl"] = _kling_upload_asset(token, data, ctype, email)
+        elif tx:
+            if not (speaker_id or "").strip():
+                raise ValueError(f"{LOG} speaker_id required when using text TTS")
+            body["text"] = tx
+            body["speakerId"] = speaker_id.strip()
+            body["speed"] = float(speed)
+            body["emotion"] = emotion
+        else:
+            raise ValueError(f"{LOG} Provide audio_url, audio_path, or text+speaker_id")
+
+        logger.info(f"{LOG} Kling avatar video mode={mode}")
+        return _kling_create_and_poll(
+            token, "/kling/avatars/video", body, timeout, "Kling avatar video"
+        )
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
@@ -813,6 +996,8 @@ NODE_CLASS_MAPPINGS = {
     "UseapiKlingImage2Video": UseapiKlingImage2Video,
     "UseapiKlingLipsync": UseapiKlingLipsync,
     "UseapiKlingMotionCreate": UseapiKlingMotionCreate,
+    "UseapiKlingTTS": UseapiKlingTTS,
+    "UseapiKlingAvatarVideo": UseapiKlingAvatarVideo,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -824,4 +1009,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiKlingImage2Video": "Useapi Kling Image-to-Video",
     "UseapiKlingLipsync": "Useapi Kling Lipsync",
     "UseapiKlingMotionCreate": "Useapi Kling Motion Control",
+    "UseapiKlingTTS": "Useapi Kling TTS",
+    "UseapiKlingAvatarVideo": "Useapi Kling Avatar Video",
 }

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-08-06
+
+### Added
+- **UseapiKlingTTS** — free Kling text-to-speech (audio URL + path + AUDIO)
+- **UseapiKlingAvatarVideo** — Avatars 2.0 talking-head (image/avatar + audio or TTS)
+
 ## [0.11.0] - 2026-08-06
 
 ### Added
