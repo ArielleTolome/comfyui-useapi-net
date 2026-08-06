@@ -1297,6 +1297,58 @@ def _multipart_encode(fields: dict, files: dict) -> tuple[bytes, str]:
     return b"".join(lines), f"multipart/form-data; boundary={boundary}"
 
 
+
+def _mureka_create_and_poll(token: str, path: str, body: dict, timeout: int, context: str):
+    """POST mureka endpoint (async preferred) and return dual tracks."""
+    url = f"{BASE_URL}{path}"
+    body = dict(body)
+    body.setdefault("async", True)
+    status, raw = core._make_request(
+        url, "POST", core._auth_headers(token),
+        json.dumps(body).encode("utf-8"), timeout=60,
+    )
+    if status not in (200, 201):
+        data = core._check_status(status, raw, url, context, token)
+    else:
+        try:
+            data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+        except Exception as exc:
+            raise RuntimeError(f"{LOG} {context} bad JSON: {exc}") from exc
+        if data.get("error"):
+            raise RuntimeError(f"{LOG} {context} error: {data.get('error')}")
+    songs = data.get("songs") or []
+    jobid = data.get("jobid") or ""
+    if not songs and jobid:
+        poll = f"{BASE_URL}/mureka/jobs/{urllib.parse.quote(str(jobid), safe='')}"
+        import time as _time
+        start = _time.time()
+        while _time.time() - start < timeout:
+            st, body2 = core._make_request(poll, "GET", core._auth_headers(token), None, timeout=30)
+            job = core._check_status(st, body2, poll, f"{context} job", token)
+            status_name = str(job.get("status") or "").lower()
+            if status_name == "completed":
+                resp = job.get("response") or {}
+                songs = resp.get("songs") or []
+                data = job
+                break
+            if status_name == "failed":
+                raise RuntimeError(f"{LOG} {context} failed: {job.get('error') or job}")
+            _time.sleep(5)
+        else:
+            raise TimeoutError(f"{LOG} {context} timed out after {timeout}s")
+    if len(songs) < 1:
+        raise RuntimeError(f"{LOG} {context}: no songs in {data}")
+    def _one(song):
+        u = song.get("mp3_url") or ""
+        if not u:
+            raise RuntimeError(f"{LOG} song missing mp3_url")
+        return u, core._download_file(u, ".mp3")
+    u1, p1 = _one(songs[0])
+    u2, p2 = _one(songs[1]) if len(songs) > 1 else (u1, p1)
+    song_ids = ",".join(str(s.get("song_id") or "") for s in songs[:2])
+    return u1, p1, u2, p2, str(jobid), song_ids, json.dumps(data, ensure_ascii=False)[:50000]
+
+
 class UseapiMurekaCreate(core._BaseNode):
     """Create a Mureka song (async poll). Returns two track paths + covers."""
 
@@ -1473,6 +1525,79 @@ class UseapiFaceswapPicsi(core._BaseNode):
         return (tensor, img_url, jobid)
 
 
+
+class UseapiMurekaInstrumental(core._BaseNode):
+    """Create instrumental Mureka tracks (async poll)."""
+
+    CATEGORY = "Useapi.net/Mureka"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("audio_url_1", "audio_path_1", "audio_url_2", "audio_path_2", "job_id", "song_ids", "record_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model": (["V9", "V8", "O2", "V7.6", "V7.5"], {"default": "V9"}),
+            },
+            "optional": {
+                "title": ("STRING", {"default": ""}),
+                "ref_id": ("STRING", {"default": ""}),
+                "account": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, prompt: str, model: str = "V9", title: str = "", ref_id: str = "",
+                account: str = "", api_token: str = "", timeout: int = 300):
+        token = core._get_token(api_token)
+        body = {"prompt": prompt, "model": model}
+        if title.strip():
+            body["title"] = title.strip()
+        if ref_id.strip():
+            body["ref_id"] = ref_id.strip()
+        if account.strip():
+            body["account"] = account.strip()
+        logger.info(f"{LOG} Mureka instrumental model={model}")
+        return _mureka_create_and_poll(token, "/mureka/music/create-instrumental", body, timeout, "Mureka instrumental")
+
+
+class UseapiMurekaExtend(core._BaseNode):
+    """Extend an existing Mureka song with new lyrics."""
+
+    CATEGORY = "Useapi.net/Mureka"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("audio_url_1", "audio_path_1", "audio_url_2", "audio_path_2", "job_id", "song_ids", "record_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "song_id": ("STRING", {"default": ""}),
+                "lyrics": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, song_id: str, lyrics: str, api_token: str = "", timeout: int = 300):
+        token = core._get_token(api_token)
+        sid = (song_id or "").strip()
+        ly = (lyrics or "").strip()
+        if not sid or not ly:
+            raise ValueError(f"{LOG} song_id and lyrics are required")
+        body = {"song_id": sid, "lyrics": ly}
+        logger.info(f"{LOG} Mureka extend song_id={sid[:40]}")
+        return _mureka_create_and_poll(token, "/mureka/music/extend", body, timeout, "Mureka extend")
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
@@ -1489,6 +1614,8 @@ NODE_CLASS_MAPPINGS = {
     "UseapiPixverseMotionControl": UseapiPixverseMotionControl,
     "UseapiPixverseExtend": UseapiPixverseExtend,
     "UseapiMurekaCreate": UseapiMurekaCreate,
+    "UseapiMurekaInstrumental": UseapiMurekaInstrumental,
+    "UseapiMurekaExtend": UseapiMurekaExtend,
     "UseapiFaceswapPicsi": UseapiFaceswapPicsi,
 }
 
@@ -1508,5 +1635,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiPixverseMotionControl": "Useapi PixVerse Motion Control",
     "UseapiPixverseExtend": "Useapi PixVerse Extend Video",
     "UseapiMurekaCreate": "Useapi Mureka Create Song",
+    "UseapiMurekaInstrumental": "Useapi Mureka Instrumental",
+    "UseapiMurekaExtend": "Useapi Mureka Extend",
     "UseapiFaceswapPicsi": "Useapi FaceSwap Picsi",
 }

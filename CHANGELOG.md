@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.0] - 2026-08-06
+
+### Added
+- **UseapiMurekaInstrumental** — instrumental create with async poll
+- **UseapiMurekaExtend** — extend song with new lyrics
+- Shared `_mureka_create_and_poll` helper
+
 ## [0.14.0] - 2026-08-06
 
 ### Added
