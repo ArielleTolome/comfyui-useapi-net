@@ -217,12 +217,286 @@ class UseapiPixverseGenerateImage(core._BaseNode):
         return (tensor, image_url, image_id)
 
 
+def _poll_until_video_url(
+    *,
+    poll_url: str,
+    token: str,
+    timeout: int,
+    context: str,
+    url_keys: tuple[str, ...] = ("video_url", "url", "result_url"),
+    status_keys: tuple[str, ...] = ("status_name", "video_status_name", "status"),
+    success_tokens: tuple[str, ...] = ("SUCCEED", "SUCCESS", "COMPLETED", "COMPLETE", "DONE"),
+    fail_tokens: tuple[str, ...] = ("FAIL", "ERROR", "CANCEL"),
+) -> tuple[str, dict]:
+    deadline = time.time() + timeout
+    last = {}
+    while time.time() < deadline:
+        st, body = core._make_request(
+            poll_url, "GET", {"Authorization": f"Bearer {token}"}, None, timeout=60
+        )
+        data = core._check_status(st, body, poll_url, context, token)
+        last = data
+        status_name = ""
+        for k in status_keys:
+            if data.get(k) is not None:
+                status_name = str(data.get(k)).upper()
+                break
+        # Kling nests under task
+        task = data.get("task") if isinstance(data.get("task"), dict) else {}
+        if not status_name and task:
+            status_name = str(task.get("status_name") or task.get("status") or "").upper()
+        if any(tok in status_name for tok in fail_tokens):
+            raise RuntimeError(f"{LOG} {context} failed: {data}")
+        # works array for Kling
+        video_url = ""
+        works = data.get("works") or task.get("works") or []
+        if isinstance(works, list):
+            for w in works:
+                if not isinstance(w, dict):
+                    continue
+                res = w.get("resource") or w.get("resourceInfo") or {}
+                if isinstance(res, dict):
+                    video_url = res.get("resource") or res.get("url") or ""
+                video_url = video_url or w.get("url") or w.get("video_url") or ""
+                if video_url:
+                    break
+        if not video_url:
+            for k in url_keys:
+                if data.get(k):
+                    video_url = data.get(k)
+                    break
+        final = bool(data.get("status_final") or task.get("status_final"))
+        if video_url and (final or any(tok in status_name for tok in success_tokens) or status_name == ""):
+            if final or any(tok in status_name for tok in success_tokens) or video_url:
+                if final or any(tok in status_name for tok in success_tokens):
+                    return video_url, data
+                # if only URL present and status processing, keep waiting unless final
+        if video_url and any(tok in status_name for tok in success_tokens):
+            return video_url, data
+        time.sleep(4)
+    # last chance
+    if last:
+        works = last.get("works") or []
+        for w in works if isinstance(works, list) else []:
+            if isinstance(w, dict):
+                res = w.get("resource") or {}
+                u = (res.get("resource") if isinstance(res, dict) else None) or w.get("url")
+                if u:
+                    return u, last
+        for k in url_keys:
+            if last.get(k):
+                return last[k], last
+    raise RuntimeError(f"{LOG} {context} timed out after {timeout}s")
+
+
+class UseapiKlingText2Video(core._BaseNode):
+    """Generate video via UseAPI Kling v1 text2video (v3 / turbo / 2.6 / ...)."""
+
+    CATEGORY = "Useapi.net/Kling"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "task_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        models = [
+            "kling-v3-0",
+            "kling-v3-0-turbo",
+            "kling-v2-6",
+            "kling-v2-5",
+            "kling-v2-1-master",
+            "kling-v1-6",
+            "kling-v1-5",
+        ]
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model_name": (models, {"default": "kling-v3-0-turbo"}),
+                "aspect_ratio": (["9:16", "16:9", "1:1"], {"default": "9:16"}),
+                "mode": (["std", "pro", "4k"], {"default": "pro"}),
+                "duration": ("INT", {"default": 5, "min": 3, "max": 15}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "enable_audio": ("BOOLEAN", {"default": True}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        prompt: str,
+        model_name: str,
+        aspect_ratio: str,
+        mode: str,
+        duration: int = 5,
+        api_token: str = "",
+        email: str = "",
+        enable_audio: bool = True,
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        url = f"{BASE_URL}/kling/videos/text2video"
+        body = {
+            "prompt": prompt,
+            "model_name": model_name,
+            "aspect_ratio": aspect_ratio,
+            "mode": mode,
+            "duration": str(int(duration)),
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        # turbo always-on audio — skip flag
+        if model_name not in ("kling-v3-0-turbo",):
+            body["enable_audio"] = bool(enable_audio)
+
+        logger.info(f"{LOG} Kling T2V model={model_name} mode={mode} dur={duration}")
+        status, raw = core._make_request(
+            url, "POST", core._auth_headers(token),
+            json.dumps(body).encode("utf-8"), timeout=min(timeout, 120),
+        )
+        data = core._check_status(status, raw, url, "Kling text2video", token)
+        task = data.get("task") if isinstance(data.get("task"), dict) else {}
+        task_id = str(task.get("id") or data.get("task_id") or data.get("id") or "")
+        if not task_id:
+            raise RuntimeError(f"{LOG} Kling create: no task id in {data}")
+
+        poll_url = f"{BASE_URL}/kling/tasks/{urllib.parse.quote(str(task_id), safe='')}"
+        video_url, _pdata = _poll_until_video_url(
+            poll_url=poll_url, token=token, timeout=timeout, context="Kling poll"
+        )
+        video_path = core._download_file(video_url, ".mp4")
+        logger.info(f"{LOG} Kling T2V complete task={task_id}")
+        return (video_url, video_path, str(task_id))
+
+
+class UseapiPixverseGenerateVideo(core._BaseNode):
+    """Generate video via UseAPI PixVerse v2 (native + third-party models)."""
+
+    CATEGORY = "Useapi.net/PixVerse"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "video_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        models = [
+            "v6",
+            "v5.6",
+            "v5.5",
+            "seedance-2.0",
+            "seedance-2.0-fast",
+            "seedance-2.0-mini",
+            "kling-v3",
+            "kling-o3",
+            "veo-3.1-fast",
+            "veo-3.1-standard",
+            "veo-3.1-lite",
+            "sora-2",
+            "sora-2-pro",
+            "happyhorse-1.0",
+            "grok-imagine",
+            "grok-imagine-1.5",
+        ]
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model": (models, {"default": "v6"}),
+                "duration": ("INT", {"default": 5, "min": 1, "max": 15}),
+                "quality": (["360p", "480p", "540p", "720p", "1080p", "2160p"], {"default": "720p"}),
+                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"], {"default": "9:16"}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "first_frame_path": ("STRING", {"default": "", "tooltip": "PixVerse upload path from POST files"}),
+                "audio": ("BOOLEAN", {"default": True}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        prompt: str,
+        model: str,
+        duration: int = 5,
+        quality: str = "720p",
+        aspect_ratio: str = "9:16",
+        api_token: str = "",
+        email: str = "",
+        first_frame_path: str = "",
+        audio: bool = True,
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        url = "https://api.useapi.net/v2/pixverse/videos/create"
+        body = {
+            "prompt": prompt,
+            "model": model,
+            "duration": int(duration),
+            "quality": quality,
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        if first_frame_path.strip():
+            body["first_frame_path"] = first_frame_path.strip()
+        else:
+            body["aspect_ratio"] = aspect_ratio
+        # audio toggle where supported
+        if model not in ("grok-imagine", "grok-imagine-1.5", "veo-3.1-lite", "sora-2", "sora-2-pro"):
+            body["audio"] = bool(audio)
+
+        logger.info(f"{LOG} PixVerse Video model={model} quality={quality} dur={duration}")
+        status, raw = core._make_request(
+            url, "POST", core._auth_headers(token),
+            json.dumps(body).encode("utf-8"), timeout=min(timeout, 120),
+        )
+        data = core._check_status(status, raw, url, "PixVerse video create", token)
+        video_id = data.get("video_id") or data.get("image_id") or ""
+        if not video_id:
+            raise RuntimeError(f"{LOG} PixVerse video create: no video_id in {data}")
+
+        poll_url = f"https://api.useapi.net/v2/pixverse/videos/{urllib.parse.quote(str(video_id), safe='')}"
+        # image templates may return image endpoint — try videos first
+        try:
+            video_url, _ = _poll_until_video_url(
+                poll_url=poll_url,
+                token=token,
+                timeout=timeout,
+                context="PixVerse video poll",
+                url_keys=("video_url", "url", "image_url"),
+                status_keys=("video_status_name", "status_name", "status"),
+            )
+        except RuntimeError:
+            # fallback image id path
+            poll_url = f"https://api.useapi.net/v2/pixverse/images/{urllib.parse.quote(str(video_id), safe='')}"
+            video_url, _ = _poll_until_video_url(
+                poll_url=poll_url,
+                token=token,
+                timeout=timeout,
+                context="PixVerse image-template poll",
+                url_keys=("image_url", "video_url", "url"),
+                status_keys=("image_status_name", "status_name", "status"),
+            )
+
+        video_path = core._download_file(video_url, ".mp4" if "video" in video_url or video_url.endswith(".mp4") else ".mp4")
+        logger.info(f"{LOG} PixVerse Video complete id={str(video_id)[:50]}")
+        return (video_url, video_path, str(video_id))
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
+    "UseapiKlingText2Video": UseapiKlingText2Video,
+    "UseapiPixverseGenerateVideo": UseapiPixverseGenerateVideo,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiMinimaxUploadFile": "Useapi MiniMax Upload File",
     "UseapiPixverseGenerateImage": "Useapi PixVerse Generate Image",
+    "UseapiKlingText2Video": "Useapi Kling Text-to-Video",
+    "UseapiPixverseGenerateVideo": "Useapi PixVerse Generate Video",
 }

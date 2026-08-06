@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2026-08-06
+
+### Added
+- **UseapiKlingText2Video** — Kling v1 text2video (v3 / turbo / 2.6 / 2.5 / master / 1.x)
+- **UseapiPixverseGenerateVideo** — PixVerse v2 video create (v6, Seedance, Kling, Veo 3.1, Sora 2, HappyHorse, Grok)
+
 ## [0.9.0] - 2026-08-06
 
 ### Added
