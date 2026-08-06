@@ -1598,6 +1598,120 @@ class UseapiMurekaExtend(core._BaseNode):
         return _mureka_create_and_poll(token, "/mureka/music/extend", body, timeout, "Mureka extend")
 
 
+
+class UseapiMurekaRegenerate(core._BaseNode):
+    """Regenerate a Mureka song from a start offset (ms)."""
+
+    CATEGORY = "Useapi.net/Mureka"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("audio_url_1", "audio_path_1", "audio_url_2", "audio_path_2", "job_id", "song_ids", "record_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "song_id": ("STRING", {"default": ""}),
+                "start_milliseconds": ("INT", {"default": 0, "min": 0, "max": 600000}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 300, "min": 60, "max": 1800}),
+            },
+        }
+
+    def execute(self, song_id: str, start_milliseconds: int = 0,
+                api_token: str = "", timeout: int = 300):
+        token = core._get_token(api_token)
+        sid = (song_id or "").strip()
+        if not sid:
+            raise ValueError(f"{LOG} song_id is required")
+        body = {"song_id": sid, "start_milliseconds": int(start_milliseconds)}
+        logger.info(f"{LOG} Mureka regenerate song_id={sid[:40]} start={start_milliseconds}")
+        return _mureka_create_and_poll(token, "/mureka/music/regenerate", body, timeout, "Mureka regenerate")
+
+
+class UseapiFaceswapChangeBG(core._BaseNode):
+    """InsightFaceSwap /changebg — replace image background from a text prompt."""
+
+    CATEGORY = "Useapi.net/FaceSwap"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_url", "job_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "a_background_photo_of": ("STRING", {"multiline": True, "default": "sunny beach"}),
+            },
+            "optional": {
+                "channel": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 180, "min": 30, "max": 900}),
+            },
+        }
+
+    def execute(
+        self,
+        image,
+        a_background_photo_of: str = "sunny beach",
+        channel: str = "",
+        api_token: str = "",
+        timeout: int = 180,
+    ):
+        token = core._get_token(api_token)
+        img = _tensor_to_png_bytes(image)
+        fields = {"a_background_photo_of": (a_background_photo_of or "").strip() or "sunny beach"}
+        if channel.strip():
+            fields["channel"] = channel.strip()
+        files = {"image": ("image.png", img, "image/png")}
+        body, ctype = _multipart_encode(fields, files)
+        url = f"{BASE_URL}/faceswap/changebg"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": ctype, "Accept": "application/json"}
+        status, raw = core._make_request(url, "POST", headers, body, timeout=timeout)
+        data = core._check_status(status, raw, url, "FaceSwap changebg", token)
+        jobid = str(data.get("jobid") or "")
+        st = str(data.get("status") or "").lower()
+        if st in ("started", "pending", "") and jobid:
+            import time as _time
+            poll2 = f"{BASE_URL}/faceswap/{urllib.parse.quote(jobid, safe='')}"
+            poll = f"{BASE_URL}/faceswap/jobs/?jobid={urllib.parse.quote(jobid, safe='')}"
+            start = _time.time()
+            while _time.time() - start < timeout:
+                for pu in (poll2, poll):
+                    try:
+                        stt, body2 = core._make_request(pu, "GET", core._auth_headers(token), None, timeout=30)
+                        if stt == 200:
+                            data = json.loads(body2.decode("utf-8") if isinstance(body2, (bytes, bytearray)) else body2)
+                            if str(data.get("status") or "").lower() in ("completed", "failed"):
+                                break
+                    except Exception:
+                        continue
+                else:
+                    _time.sleep(3)
+                    continue
+                if str(data.get("status") or "").lower() in ("completed", "failed"):
+                    break
+                _time.sleep(3)
+            if str(data.get("status") or "").lower() == "failed":
+                raise RuntimeError(f"{LOG} FaceSwap changebg failed: {data.get('error') or data}")
+        attachments = data.get("attachments") or []
+        if not attachments:
+            raise RuntimeError(f"{LOG} FaceSwap changebg: no attachments in {data}")
+        img_url = attachments[0].get("url") or attachments[0].get("proxy_url") or ""
+        if not img_url:
+            raise RuntimeError(f"{LOG} FaceSwap changebg: empty attachment url")
+        img_path = core._download_file(img_url, ".png")
+        with open(img_path, "rb") as f:
+            tensor = core._bytes_to_tensor(f.read())
+        logger.info(f"{LOG} FaceSwap changebg complete job={jobid}")
+        return (tensor, img_url, jobid)
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
@@ -1616,7 +1730,9 @@ NODE_CLASS_MAPPINGS = {
     "UseapiMurekaCreate": UseapiMurekaCreate,
     "UseapiMurekaInstrumental": UseapiMurekaInstrumental,
     "UseapiMurekaExtend": UseapiMurekaExtend,
+    "UseapiMurekaRegenerate": UseapiMurekaRegenerate,
     "UseapiFaceswapPicsi": UseapiFaceswapPicsi,
+    "UseapiFaceswapChangeBG": UseapiFaceswapChangeBG,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1637,5 +1753,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiMurekaCreate": "Useapi Mureka Create Song",
     "UseapiMurekaInstrumental": "Useapi Mureka Instrumental",
     "UseapiMurekaExtend": "Useapi Mureka Extend",
+    "UseapiMurekaRegenerate": "Useapi Mureka Regenerate",
     "UseapiFaceswapPicsi": "Useapi FaceSwap Picsi",
+    "UseapiFaceswapChangeBG": "Useapi FaceSwap Change Background",
 }

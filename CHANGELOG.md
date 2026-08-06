@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-08-06
+
+### Added
+- **UseapiMurekaRegenerate** — regenerate from start offset
+- **UseapiFaceswapChangeBG** — background replace via text prompt
+
 ## [0.15.0] - 2026-08-06
 
 ### Added
