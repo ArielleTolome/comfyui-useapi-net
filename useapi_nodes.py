@@ -1,8 +1,9 @@
 """ComfyUI-UseapiNet: Custom nodes for Useapi.net API integration.
 
 Provides image and video generation via:
-  - Google Flow: Imagen 4, Gemini (Nano Banana), Veo 3.1
+  - Google Flow: Nano Banana 2 Lite / 2 / Pro, Veo 3.1
   - Runway: Gen-4.5, Gen-4 (incl. Aleph), Gen-4 Turbo, Gen-3 Turbo, Frames
+  - MiniMax: Hailuo-3.0 (H3), Seedance 2.0 family via MiniMax API v1
 """
 import os
 import io
@@ -62,6 +63,7 @@ _ESTIMATED_SECS_VEO_EXTEND = 150
 _ESTIMATED_SECS_GOOGLE_FLOW_IMAGE = 120
 _ESTIMATED_SECS_VEO_GIF = 30
 _ESTIMATED_SECS_VEO_CONCAT = 90
+_ESTIMATED_SECS_MINIMAX = 300
 _RETRY_DELAY_RECAPTCHA = 2.0
 
 _CONFIG = {}
@@ -741,8 +743,6 @@ class UseapiTokenFromEnv(_BaseNode):
             )
         logger.info(f"{LOG} Token loaded from env var '{env_var_name}'")
         return (token,)
-
-# ── ComfyUI Registration ──────────────────────────────────────────────────────
 # ── Node 2: Veo Generate Video ────────────────────────────────────────────────
 class UseapiVeoGenerate(_BaseNode):
     """Generate video using Google Veo 3.1 via Google Flow.
@@ -879,13 +879,21 @@ class UseapiVeoGenerate(_BaseNode):
                     f"{LOG} Veo generation failed. Status={media_status}. "
                     f"media={_redact_token(json.dumps(media_item), token)}"
                 )
-            video_url = media_item.get("videoUrl", "")
+            video_url = (
+                media_item.get("videoUrl", "")
+                or media_item.get("fifeUrl", "")
+                or media_item.get("servingBaseUri", "")
+            )
             media_gen_id = media_item.get("mediaGenerationId", "")
 
         if not video_url:
+            # July 2026: Google sometimes omits download links temporarily.
+            # Prefer a clear error; caller can re-poll the job.
             raise RuntimeError(
-                f"{LOG} Veo generate: video URL missing in response. "
-                f"The API might have changed. Detail: {_redact_token(json.dumps(data), token)}"
+                f"{LOG} Veo generate: video URL missing in response "
+                f"(videoUrl/fifeUrl empty — Google may be rate-limiting CDN links; "
+                f"retry GET /jobs later or use assets?raw=true). "
+                f"Detail: {_redact_token(json.dumps(data), token)}"
             )
 
         logger.info(f"{LOG} Veo Generate: complete. mediaGenerationId={media_gen_id!r}")
@@ -1004,11 +1012,17 @@ class UseapiVeoExtend(_BaseNode):
 
 # ── Node 5: Google Flow Generate Image ───────────────────────────────────────
 class UseapiGoogleFlowGenerateImage(_BaseNode):
-    """Generate images using Imagen 4, Nano Banana, or Nano Banana Pro.
+    """Generate images using Nano Banana 2 Lite / 2 / Pro (Google Flow).
 
     Server-side auto-poll: returns in ~10-20s. Timeout: 120s.
     Outputs first image as a ComfyUI IMAGE tensor; all URLs as JSON string.
     media_generation_id can feed into VeoGenerate or be used as a reference image.
+
+    Models (July 2026):
+      - nano-banana-2-lite (default; imagen-4 is a deprecated alias)
+      - nano-banana-2 (nano-banana is a deprecated alias)
+      - nano-banana-pro
+    Aspect ratios: 16:9, 4:3, 1:1, 3:4, 9:16, auto (+ legacy landscape/portrait).
     """
 
     CATEGORY = "Useapi.net/Google Flow"
@@ -1019,11 +1033,35 @@ class UseapiGoogleFlowGenerateImage(_BaseNode):
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_model = _get_config_value("UseapiGoogleFlowGenerateImage", "model", "imagen-4")
-        default_ar = _get_config_value("UseapiGoogleFlowGenerateImage", "aspect_ratio", "landscape")
+        default_model = _get_config_value(
+            "UseapiGoogleFlowGenerateImage", "model", "nano-banana-2-lite"
+        )
+        default_ar = _get_config_value(
+            "UseapiGoogleFlowGenerateImage", "aspect_ratio", "16:9"
+        )
 
-        models = ["imagen-4", "nano-banana", "nano-banana-pro", "nano-banana-2"]
-        aspect_ratios = ["landscape", "portrait"]
+        models = [
+            "nano-banana-2-lite",
+            "nano-banana-2",
+            "nano-banana-pro",
+            # deprecated aliases still accepted by the API
+            "nano-banana",
+            "imagen-4",
+        ]
+        aspect_ratios = [
+            "16:9", "4:3", "1:1", "3:4", "9:16", "auto",
+            "landscape", "portrait",  # legacy aliases
+        ]
+
+        optional = {
+            "api_token": ("STRING", {"default": ""}),
+            "email": ("STRING", {"default": ""}),
+            "count": ("INT", {"default": 4, "min": 1, "max": 4}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+            "captcha_retry": ("INT", {"default": 3, "min": 1, "max": 10}),
+        }
+        for i in range(1, 11):
+            optional[f"reference_{i}"] = ("STRING", {"default": ""})
 
         return {
             "required": {
@@ -1031,28 +1069,21 @@ class UseapiGoogleFlowGenerateImage(_BaseNode):
                 "model": (_get_sorted_list(models, default_model),),
                 "aspect_ratio": (_get_sorted_list(aspect_ratios, default_ar),),
             },
-            "optional": {
-                "api_token": ("STRING", {"default": ""}),
-                "email": ("STRING", {"default": ""}),
-                "count": ("INT", {"default": 4, "min": 1, "max": 4}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
-                "captcha_retry": ("INT", {"default": 3, "min": 1, "max": 10}),
-                "reference_1": ("STRING", {"default": ""}),
-                "reference_2": ("STRING", {"default": ""}),
-                "reference_3": ("STRING", {"default": ""}),
-                "reference_4": ("STRING", {"default": ""}),
-                "reference_5": ("STRING", {"default": ""}),
-                "reference_6": ("STRING", {"default": ""}),
-            },
+            "optional": optional,
         }
 
     def execute(self, prompt: str, model: str, aspect_ratio: str,
                 api_token: str = "", email: str = "", count: int = 4,
                 seed: int = 0, captcha_retry: int = 3,
                 reference_1: str = "", reference_2: str = "", reference_3: str = "",
-                reference_4: str = "", reference_5: str = "", reference_6: str = ""):
+                reference_4: str = "", reference_5: str = "", reference_6: str = "",
+                reference_7: str = "", reference_8: str = "", reference_9: str = "",
+                reference_10: str = ""):
         token = _get_token(api_token)
         url = f"{BASE_URL}/google-flow/images"
+        # Map legacy aspect aliases for clarity (API also accepts them)
+        ar_map = {"landscape": "16:9", "portrait": "9:16"}
+        aspect_ratio = ar_map.get(aspect_ratio, aspect_ratio)
         body = {
             "prompt": prompt,
             "model": model,
@@ -1063,10 +1094,19 @@ class UseapiGoogleFlowGenerateImage(_BaseNode):
             body["seed"] = seed & 0x7FFFFFFF
         if email.strip():
             body["email"] = email.strip()
-        refs = [reference_1, reference_2, reference_3, reference_4, reference_5, reference_6]
+        refs = [
+            reference_1, reference_2, reference_3, reference_4, reference_5,
+            reference_6, reference_7, reference_8, reference_9, reference_10,
+        ]
         for i, ref in enumerate(refs, start=1):
             if ref.strip():
                 body[f"reference_{i}"] = ref.strip()
+
+        if aspect_ratio == "auto" and not any(r.strip() for r in refs):
+            raise ValueError(
+                f"{LOG} Google Flow Image: aspect_ratio='auto' is only valid with "
+                "at least one reference image (image-to-image)."
+            )
 
         logger.info(f"{LOG} Google Flow Image: model={model}, count={count}, prompt='{prompt[:60]}'")
         data = _submit_with_progress(
@@ -1079,27 +1119,45 @@ class UseapiGoogleFlowGenerateImage(_BaseNode):
             raise RuntimeError(f"{LOG} Google Flow image: no media in response: {data}")
 
         urls = []
+        inline_bytes = None
         first_media_gen_id = ""
         for i, m in enumerate(media_list):
             gen_img = m.get("image", {}).get("generatedImage", {})
-            fife_url = gen_img.get("fifeUrl", "")
+            fife_url = gen_img.get("fifeUrl", "") or gen_img.get("servingBaseUri", "")
             if fife_url:
                 urls.append(fife_url)
+            elif i == 0 and gen_img.get("encodedImage"):
+                # July 2026: when CDN link is blocked, image arrives as base64
+                try:
+                    inline_bytes = base64.b64decode(gen_img["encodedImage"])
+                except Exception as e:
+                    raise RuntimeError(
+                        f"{LOG} Google Flow image: failed to decode encodedImage: {e}"
+                    ) from e
             if i == 0:
                 first_media_gen_id = gen_img.get("mediaGenerationId", "")
 
-        if not urls:
-            raise RuntimeError(f"{LOG} Google Flow image: no fifeUrls found in response: {data}")
+        if not urls and inline_bytes is None:
+            raise RuntimeError(
+                f"{LOG} Google Flow image: no fifeUrl/encodedImage in response: {data}"
+            )
 
-        logger.info(f"{LOG} Google Flow Image: {len(urls)} image(s). mediaGenerationId={first_media_gen_id[:50]}...")
+        logger.info(
+            f"{LOG} Google Flow Image: {max(len(urls), 1)} image(s). "
+            f"mediaGenerationId={first_media_gen_id[:50]}..."
+        )
 
-        # Download first image and convert to ComfyUI tensor
-        s2, img_bytes = _make_request(urls[0], "GET", {}, None, 60)
-        if s2 != 200:
-            raise RuntimeError(f"{LOG} Failed to download image from {urls[0]} (HTTP {s2})")
+        if urls:
+            s2, img_bytes = _make_request(urls[0], "GET", {}, None, 60)
+            if s2 != 200:
+                raise RuntimeError(f"{LOG} Failed to download image from {urls[0]} (HTTP {s2})")
+            image_url = urls[0]
+        else:
+            img_bytes = inline_bytes
+            image_url = ""
+
         image_tensor = _bytes_to_tensor(img_bytes)
-
-        return (image_tensor, urls[0], first_media_gen_id, json.dumps(urls))
+        return (image_tensor, image_url, first_media_gen_id, json.dumps(urls))
 
 
 # ── Node 6: Google Flow Upload Asset ─────────────────────────────────────────
@@ -1411,7 +1469,7 @@ class UseapiRunwayFramesGenerate(_BaseNode):
             "optional": {
                 "api_token": ("STRING", {"default": ""}),
                 "email": ("STRING", {"default": ""}),
-                "aspect_ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
+                "aspect_ratio": (["auto", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],),
                 "style": ("STRING", {"default": ""}),
                 "diversity": ("INT", {"default": 2, "min": 0, "max": 5}),
                 "num_images": (["1", "4"],),
@@ -1865,7 +1923,7 @@ class UseapiRunwayImages(_BaseNode):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (["nano-banana", "nano-banana-pro", "nano-banana-2", "gen4", "gen4-turbo"],),
+                "model": (["nano-banana-2-lite", "nano-banana-2", "nano-banana-pro", "nano-banana", "gen4", "gen4-turbo"],),
                 "text_prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
@@ -2547,6 +2605,242 @@ class UseapiRunwayGen3TurboActOne(_BaseNode):
         return (video_url, video_path, task_id)
 
 
+
+# ── Node: MiniMax / Hailuo video (H3 + Seedance via MiniMax API v1) ───────────
+class UseapiMinimaxGenerate(_BaseNode):
+    """Generate video via UseAPI MiniMax API v1.
+
+    Primary models (2026-07+):
+      - Hailuo-3.0  (MiniMax H3): 2K / 1440 short-edge, 4–15s, native stereo audio
+      - Seedance-2.0 / Seedance-2.0-Fast / Seedance-2.0-Mini
+      - Legacy Hailuo 02 / 2.3 and others still accepted by the API
+
+    Docs: https://useapi.net/docs/api-minimax-v1/post-minimax-videos-create
+    """
+
+    CATEGORY = "Useapi.net/MiniMax"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "job_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        default_model = _get_config_value(
+            "UseapiMinimaxGenerate", "model", "Hailuo-3.0"
+        )
+        models = [
+            "Hailuo-3.0",
+            "Seedance-2.0",
+            "Seedance-2.0-Fast",
+            "Seedance-2.0-Mini",
+            "02",
+            "T2V-2.3",
+            "I2V-2.3",
+            "I2V-2.3-Fast",
+            "Sora-2",
+            "Veo-3.1",
+            "Veo-3.1-Fast",
+            "T2V-01",
+            "I2V-01",
+        ]
+        aspect_ratios = ["Auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
+        resolutions = ["1440", "720", "480", "1080", "4K"]
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model": (_get_sorted_list(models, default_model),),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "account": ("STRING", {"default": ""}),
+                "aspect_ratio": (aspect_ratios, {"default": "9:16"}),
+                "resolution": (resolutions, {"default": "1440"}),
+                "duration": ("INT", {"default": 15, "min": 4, "max": 15}),
+                "file_id": ("STRING", {"default": ""}),
+                "end_frame_file_id": ("STRING", {"default": ""}),
+                "options": ("STRING", {
+                    "default": "",
+                    "tooltip": "Legacy options string for 02/2.3/Sora/Veo models "
+                               "(e.g. 768p-6sec). Leave empty for Hailuo-3.0/Seedance.",
+                }),
+                "prompt_optimization": ("BOOLEAN", {"default": False}),
+                "timeout": ("INT", {"default": 0, "min": 0, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        prompt: str,
+        model: str,
+        api_token: str = "",
+        account: str = "",
+        aspect_ratio: str = "9:16",
+        resolution: str = "1440",
+        duration: int = 15,
+        file_id: str = "",
+        end_frame_file_id: str = "",
+        options: str = "",
+        prompt_optimization: bool = False,
+        timeout: int = 0,
+    ):
+        token = _get_token(api_token)
+        resolved_timeout = (
+            timeout if timeout > 0
+            else _get_config_value("UseapiMinimaxGenerate", "timeout", _TIMEOUT_XLONG)
+        )
+        url = f"{BASE_URL}/minimax/videos/create"
+
+        body = {"model": model, "prompt": prompt}
+        if account.strip():
+            body["account"] = account.strip()
+        if prompt_optimization:
+            body["promptOptimization"] = True
+
+        # New-style models use resolution + duration (no options)
+        new_style = model.startswith("Hailuo-3.0") or model.startswith("Seedance-2.0")
+        if new_style:
+            if model.startswith("Hailuo-3.0"):
+                # Only 1440 is currently accepted/priced for H3
+                body["resolution"] = "1440"
+            else:
+                body["resolution"] = resolution
+            body["duration"] = int(duration)
+            if aspect_ratio and aspect_ratio != "Auto":
+                body["aspectRatio"] = aspect_ratio
+            elif aspect_ratio == "Auto":
+                body["aspectRatio"] = "Auto"
+        else:
+            if options.strip():
+                body["options"] = options.strip()
+            if aspect_ratio and aspect_ratio not in ("Auto",):
+                # Sora/Veo only accept 16:9 / 9:16
+                if aspect_ratio in ("16:9", "9:16"):
+                    body["aspectRatio"] = aspect_ratio
+
+        if file_id.strip():
+            body["fileID"] = file_id.strip()
+        if end_frame_file_id.strip():
+            body["end_frame_fileID"] = end_frame_file_id.strip()
+
+        if model.startswith("Hailuo-3.0") and not prompt.strip():
+            raise ValueError(
+                f"{LOG} MiniMax Hailuo-3.0 requires a non-empty prompt on every request "
+                "(including image-to-video)."
+            )
+
+        logger.info(
+            f"{LOG} MiniMax Generate: model={model}, duration={duration}, "
+            f"resolution={body.get('resolution', options)!r}, prompt='{prompt[:60]}...'"
+        )
+
+        # Submit create; then poll job status if needed
+        status, data = _make_request(
+            url, "POST",
+            {"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            body, min(resolved_timeout, 120),
+        )
+        if isinstance(data, (bytes, bytearray)):
+            try:
+                data = json.loads(data.decode("utf-8", errors="replace"))
+            except Exception:
+                raise RuntimeError(f"{LOG} MiniMax create: non-JSON response HTTP {status}")
+        if status >= 400:
+            raise RuntimeError(
+                f"{LOG} MiniMax create failed HTTP {status}: "
+                f"{_redact_token(json.dumps(data) if not isinstance(data, str) else data, token)}"
+            )
+
+        job_id = ""
+        if isinstance(data, dict):
+            job_id = str(data.get("jobid") or data.get("jobId") or data.get("id") or "")
+
+        # Some responses return video immediately; most need polling
+        video_url = ""
+        if isinstance(data, dict):
+            video_url = (
+                data.get("videoURL")
+                or data.get("videoUrl")
+                or data.get("url")
+                or ""
+            )
+            # nested shapes
+            if not video_url and isinstance(data.get("video"), dict):
+                video_url = data["video"].get("url") or data["video"].get("videoURL") or ""
+
+        deadline = time.time() + resolved_timeout
+        poll_url = None
+        if job_id:
+            # Prefer job-specific endpoint when present
+            poll_url = f"{BASE_URL}/minimax/jobs/{urllib.parse.quote(job_id, safe='')}"
+
+        pbar = None
+        try:
+            from comfy.utils import ProgressBar
+            pbar = ProgressBar(100)
+        except Exception:
+            pbar = None
+
+        started = time.time()
+        while not video_url and time.time() < deadline:
+            if pbar is not None:
+                elapsed = time.time() - started
+                pct = min(95, int(100 * elapsed / max(_ESTIMATED_SECS_MINIMAX, 1)))
+                pbar.update_absolute(pct, 100)
+            time.sleep(5)
+            if not poll_url:
+                # Fall back: list-less — re-check create payload only once
+                break
+            st, pdata = _make_request(
+                poll_url, "GET",
+                {"Authorization": f"Bearer {token}"},
+                None, _TIMEOUT_POLL,
+            )
+            if isinstance(pdata, (bytes, bytearray)):
+                try:
+                    pdata = json.loads(pdata.decode("utf-8", errors="replace"))
+                except Exception:
+                    continue
+            if not isinstance(pdata, dict):
+                continue
+            status_str = str(
+                pdata.get("status") or pdata.get("jobStatus") or pdata.get("state") or ""
+            ).upper()
+            if any(x in status_str for x in ("FAIL", "ERROR", "CANCEL")):
+                raise RuntimeError(
+                    f"{LOG} MiniMax job failed: status={status_str} "
+                    f"detail={_redact_token(json.dumps(pdata), token)}"
+                )
+            video_url = (
+                pdata.get("videoURL")
+                or pdata.get("videoUrl")
+                or pdata.get("url")
+                or ""
+            )
+            if not video_url and isinstance(pdata.get("video"), dict):
+                video_url = pdata["video"].get("url") or pdata["video"].get("videoURL") or ""
+            if not video_url and isinstance(pdata.get("artifacts"), list) and pdata["artifacts"]:
+                art0 = pdata["artifacts"][0]
+                if isinstance(art0, dict):
+                    video_url = art0.get("url") or art0.get("videoURL") or ""
+            if video_url:
+                job_id = job_id or str(pdata.get("jobid") or pdata.get("jobId") or "")
+                break
+
+        if not video_url:
+            raise RuntimeError(
+                f"{LOG} MiniMax generate timed out or returned no video URL "
+                f"(job_id={job_id!r}). Last create payload keys: "
+                f"{list(data.keys()) if isinstance(data, dict) else type(data)}"
+            )
+
+        if pbar is not None:
+            pbar.update_absolute(100, 100)
+        logger.info(f"{LOG} MiniMax Generate: complete job_id={job_id!r}")
+        video_path = _download_file(video_url, ".mp4")
+        return (video_url, video_path, job_id)
+
+
 # ── ComfyUI Registration ──────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
     "UseapiTokenFromEnv":             UseapiTokenFromEnv,
@@ -2578,6 +2872,7 @@ NODE_CLASS_MAPPINGS = {
     "UseapiRunwayAleph":              UseapiRunwayAleph,
     "UseapiRunwayGen3TurboExpand":    UseapiRunwayGen3TurboExpand,
     "UseapiRunwayGen3TurboActOne":    UseapiRunwayGen3TurboActOne,
+    "UseapiMinimaxGenerate":         UseapiMinimaxGenerate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiTokenFromEnv":             "Useapi Token From Env",
@@ -2609,4 +2904,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiRunwayAleph":              "Useapi Runway Aleph",
     "UseapiRunwayGen3TurboExpand":    "Useapi Runway Gen3 Turbo Expand",
     "UseapiRunwayGen3TurboActOne":    "Useapi Runway Gen3 Turbo Act One",
+    "UseapiMinimaxGenerate":         "Useapi MiniMax Generate Video (H3/Seedance)",
 }

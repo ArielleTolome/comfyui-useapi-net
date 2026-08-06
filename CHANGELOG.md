@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-08-06
+
+### Added
+- **`UseapiMinimaxGenerate`** node (`Useapi.net/MiniMax`): MiniMax API v1 video generation with **Hailuo-3.0 (MiniMax H3)**, Seedance 2.0 / Fast / Mini, plus legacy 02/2.3/Sora/Veo model IDs. Supports aspect ratio, resolution, duration (4–15s), start/end frame file IDs, and per-node timeout.
+- Google Flow image models aligned to July 2026 API: **`nano-banana-2-lite`** (default), `nano-banana-2`, `nano-banana-pro` (deprecated aliases `imagen-4` / `nano-banana` still listed).
+- Google Flow aspect ratios: `16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `auto` (+ legacy landscape/portrait).
+- Up to **10 reference images** on `UseapiGoogleFlowGenerateImage` (API max).
+- **`encodedImage` fallback** when Google omits `fifeUrl` (July 27 2026 CDN rate-limit behavior).
+- Runway Images model list includes `nano-banana-2-lite`.
+
+### Fixed
+- Veo media responses: accept `videoUrl` / `fifeUrl` / `servingBaseUri`; clearer error when Google omits download links temporarily.
+- Default image model no longer points at removed Imagen-4 as primary.
+
+### Docs / config
+- `nodes_config.json` defaults updated for nano-banana-2-lite and MiniMax H3.
+- Package version bumped to **0.8.0**.
+
 ## [0.7.0] - 2026-03-03
 
 ### Added

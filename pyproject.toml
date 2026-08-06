@@ -1,9 +1,9 @@
 [project]
 name = "UseAPI.net"
-description = "ComfyUI custom nodes for UseAPI.net — Google Flow, Veo, and Runway ML"
-version = "1.0.0"
+description = "ComfyUI custom nodes for UseAPI.net — Google Flow, Veo, Runway ML, MiniMax H3/Seedance"
+version = "0.8.0"
 license = { text = "MIT" }
 
 [project.urls]
 Homepage = "https://useapi.net"
-Repository = "https://github.com/useapi/comfyui-useapi-node"
+Repository = "https://github.com/ArielleTolome/comfyui-useapi-net"

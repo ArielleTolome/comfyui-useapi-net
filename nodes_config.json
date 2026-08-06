@@ -3,5 +3,13 @@
   "default_aspect_ratio": "16:9",
   "UseapiVeoGenerate": {
     "model": "veo-3.1-fast"
+  },
+  "UseapiGoogleFlowGenerateImage": {
+    "model": "nano-banana-2-lite",
+    "aspect_ratio": "16:9"
+  },
+  "UseapiMinimaxGenerate": {
+    "model": "Hailuo-3.0",
+    "timeout": 900
   }
 }
