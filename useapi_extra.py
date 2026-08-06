@@ -987,6 +987,291 @@ class UseapiKlingAvatarVideo(core._BaseNode):
         )
 
 
+
+def _pixverse_upload(token: str, data: bytes, content_type: str, email: str = "") -> str:
+    """Upload to PixVerse files; return path (preferred) or url."""
+    qs = ""
+    if email.strip():
+        qs = "?" + urllib.parse.urlencode({"email": email.strip()})
+    url = f"https://api.useapi.net/v2/pixverse/files/{qs}" if qs else "https://api.useapi.net/v2/pixverse/files/"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": content_type}
+    status, body = core._make_request(url, "POST", headers, data, timeout=300)
+    resp = core._check_status(status, body, url, "PixVerse file upload", token)
+    path = resp.get("path") or (resp.get("file") or {}).get("path") or ""
+    if not path:
+        path = resp.get("url") or resp.get("id") or ""
+    if not path:
+        raise RuntimeError(f"{LOG} PixVerse upload: no path in {resp}")
+    return str(path)
+
+
+def _pixverse_create_and_poll(token: str, path: str, body: dict, timeout: int, context: str):
+    url = f"https://api.useapi.net/v2{path}"
+    status, raw = core._make_request(
+        url, "POST", core._auth_headers(token),
+        json.dumps(body).encode("utf-8"), timeout=min(timeout, 120),
+    )
+    data = core._check_status(status, raw, url, context, token)
+    video_id = data.get("video_id") or data.get("image_id") or ""
+    if not video_id:
+        raise RuntimeError(f"{LOG} {context}: no video_id in {data}")
+    poll_url = f"https://api.useapi.net/v2/pixverse/videos/{urllib.parse.quote(str(video_id), safe='')}"
+    video_url, _ = _poll_until_video_url(
+        poll_url=poll_url,
+        token=token,
+        timeout=timeout,
+        context=f"{context} poll",
+        url_keys=("url", "video_url", "image_url"),
+        status_keys=("video_status_name", "status_name", "status"),
+    )
+    video_path = core._download_file(video_url, ".mp4")
+    return video_url, video_path, str(video_id)
+
+
+class UseapiPixverseUploadFile(core._BaseNode):
+    """Upload IMAGE / local video / audio to PixVerse files; returns path for other nodes."""
+
+    CATEGORY = "Useapi.net/PixVerse"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("path",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "image": ("IMAGE",),
+                "video_path": ("STRING", {"default": ""}),
+                "audio_path": ("STRING", {"default": ""}),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+            },
+        }
+
+    def execute(self, image=None, video_path: str = "", audio_path: str = "",
+                api_token: str = "", email: str = ""):
+        token = core._get_token(api_token)
+        if image is not None:
+            data = _tensor_to_png_bytes(image)
+            ctype = "image/png"
+        elif video_path.strip():
+            vp = video_path.strip()
+            if not core._is_safe_path(vp):
+                raise ValueError(f"{LOG} unsafe video_path")
+            with open(vp, "rb") as f:
+                data = f.read()
+            ctype = "video/mp4"
+        elif audio_path.strip():
+            ap = audio_path.strip()
+            if not core._is_safe_path(ap):
+                raise ValueError(f"{LOG} unsafe audio_path")
+            with open(ap, "rb") as f:
+                data = f.read()
+            ctype = "audio/mpeg" if ap.lower().endswith(".mp3") else "audio/wav"
+        else:
+            raise ValueError(f"{LOG} Provide image, video_path, or audio_path")
+        path = _pixverse_upload(token, data, ctype, email)
+        logger.info(f"{LOG} PixVerse file uploaded: {path}")
+        return (path,)
+
+
+class UseapiPixverseLipsync(core._BaseNode):
+    """Lip-sync a PixVerse video with audio_path or TTS prompt."""
+
+    CATEGORY = "Useapi.net/PixVerse"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "video_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "video_id": ("STRING", {"default": ""}),
+                "video_path": ("STRING", {"default": "", "tooltip": "PixVerse upload path OR local file"}),
+                "audio_path": ("STRING", {"default": "", "tooltip": "PixVerse upload path OR local file"}),
+                "prompt": ("STRING", {"default": "", "tooltip": "TTS text if no audio_path (max 200)"}),
+                "speaker_id": ("INT", {"default": 0, "min": 0, "max": 10_000_000}),
+                "original_sound_switch": ("BOOLEAN", {"default": False}),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        video_id: str = "",
+        video_path: str = "",
+        audio_path: str = "",
+        prompt: str = "",
+        speaker_id: int = 0,
+        original_sound_switch: bool = False,
+        api_token: str = "",
+        email: str = "",
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        body: dict = {"original_sound_switch": bool(original_sound_switch)}
+        if email.strip():
+            body["email"] = email.strip()
+        vid = (video_id or "").strip()
+        vp = (video_path or "").strip()
+        if vid:
+            body["video_id"] = vid
+        elif vp:
+            if core._is_safe_path(vp) and not vp.startswith("upload/"):
+                with open(vp, "rb") as f:
+                    data = f.read()
+                body["video_path"] = _pixverse_upload(token, data, "video/mp4", email)
+            else:
+                body["video_path"] = vp
+        else:
+            raise ValueError(f"{LOG} Provide video_id or video_path")
+
+        ap = (audio_path or "").strip()
+        if ap:
+            if core._is_safe_path(ap) and not ap.startswith("upload/"):
+                with open(ap, "rb") as f:
+                    data = f.read()
+                ctype = "audio/mpeg" if ap.lower().endswith(".mp3") else "audio/wav"
+                body["audio_path"] = _pixverse_upload(token, data, ctype, email)
+            else:
+                body["audio_path"] = ap
+        elif prompt.strip():
+            body["prompt"] = prompt.strip()[:200]
+            if speaker_id:
+                body["speaker_id"] = int(speaker_id)
+        else:
+            raise ValueError(f"{LOG} Provide audio_path or prompt(+speaker_id)")
+
+        logger.info(f"{LOG} PixVerse lipsync")
+        return _pixverse_create_and_poll(token, "/pixverse/videos/lipsync", body, timeout, "PixVerse lipsync")
+
+
+class UseapiPixverseMotionControl(core._BaseNode):
+    """Drive a character image with motion from a reference video."""
+
+    CATEGORY = "Useapi.net/PixVerse"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "video_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "motion": ("STRING", {"default": "", "tooltip": "Local video path or PixVerse upload path"}),
+                "quality": (["720p", "540p", "360p"], {"default": "720p"}),
+            },
+            "optional": {
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(self, image, motion: str, quality: str = "720p",
+                api_token: str = "", email: str = "", timeout: int = 900):
+        token = core._get_token(api_token)
+        frame_path = _pixverse_upload(token, _tensor_to_png_bytes(image), "image/png", email)
+        m = (motion or "").strip()
+        if not m:
+            raise ValueError(f"{LOG} motion is required")
+        if core._is_safe_path(m) and not m.startswith("upload/"):
+            with open(m, "rb") as f:
+                data = f.read()
+            video_path = _pixverse_upload(token, data, "video/mp4", email)
+        else:
+            video_path = m
+        body = {
+            "frame_1_path": frame_path,
+            "video_1_path": video_path,
+            "quality": quality,
+            "model": "v5.6",
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        logger.info(f"{LOG} PixVerse motion-control")
+        return _pixverse_create_and_poll(
+            token, "/pixverse/videos/motion-control", body, timeout, "PixVerse motion"
+        )
+
+
+class UseapiPixverseExtend(core._BaseNode):
+    """Extend a PixVerse (or Grok Imagine) video."""
+
+    CATEGORY = "Useapi.net/PixVerse"
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video_url", "video_path", "video_id")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "model": (["v6", "grok-imagine"], {"default": "v6"}),
+                "duration": ("INT", {"default": 5, "min": 1, "max": 15}),
+                "quality": (["1080p", "720p", "540p", "480p", "360p"], {"default": "720p"}),
+            },
+            "optional": {
+                "video_id": ("STRING", {"default": ""}),
+                "video_path": ("STRING", {"default": ""}),
+                "audio": ("BOOLEAN", {"default": False}),
+                "api_token": ("STRING", {"default": ""}),
+                "email": ("STRING", {"default": ""}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 7200}),
+            },
+        }
+
+    def execute(
+        self,
+        prompt: str,
+        model: str = "v6",
+        duration: int = 5,
+        quality: str = "720p",
+        video_id: str = "",
+        video_path: str = "",
+        audio: bool = False,
+        api_token: str = "",
+        email: str = "",
+        timeout: int = 900,
+    ):
+        token = core._get_token(api_token)
+        body = {
+            "prompt": prompt,
+            "model": model,
+            "duration": int(duration),
+            "quality": quality,
+        }
+        if email.strip():
+            body["email"] = email.strip()
+        if model == "v6":
+            body["audio"] = bool(audio)
+        vid = (video_id or "").strip()
+        vp = (video_path or "").strip()
+        if vid:
+            body["video_id"] = vid
+        elif vp:
+            if core._is_safe_path(vp) and not vp.startswith("upload/"):
+                with open(vp, "rb") as f:
+                    data = f.read()
+                body["video_path"] = _pixverse_upload(token, data, "video/mp4", email)
+            else:
+                body["video_path"] = vp
+        else:
+            raise ValueError(f"{LOG} Provide video_id or video_path to extend")
+        logger.info(f"{LOG} PixVerse extend model={model}")
+        return _pixverse_create_and_poll(token, "/pixverse/videos/extend", body, timeout, "PixVerse extend")
+
+
 NODE_CLASS_MAPPINGS = {
     "UseapiMinimaxUploadFile": UseapiMinimaxUploadFile,
     "UseapiPixverseGenerateImage": UseapiPixverseGenerateImage,
@@ -998,6 +1283,10 @@ NODE_CLASS_MAPPINGS = {
     "UseapiKlingMotionCreate": UseapiKlingMotionCreate,
     "UseapiKlingTTS": UseapiKlingTTS,
     "UseapiKlingAvatarVideo": UseapiKlingAvatarVideo,
+    "UseapiPixverseUploadFile": UseapiPixverseUploadFile,
+    "UseapiPixverseLipsync": UseapiPixverseLipsync,
+    "UseapiPixverseMotionControl": UseapiPixverseMotionControl,
+    "UseapiPixverseExtend": UseapiPixverseExtend,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1011,4 +1300,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UseapiKlingMotionCreate": "Useapi Kling Motion Control",
     "UseapiKlingTTS": "Useapi Kling TTS",
     "UseapiKlingAvatarVideo": "Useapi Kling Avatar Video",
+    "UseapiPixverseUploadFile": "Useapi PixVerse Upload File",
+    "UseapiPixverseLipsync": "Useapi PixVerse Lipsync",
+    "UseapiPixverseMotionControl": "Useapi PixVerse Motion Control",
+    "UseapiPixverseExtend": "Useapi PixVerse Extend Video",
 }

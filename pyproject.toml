@@ -1,7 +1,7 @@
 [project]
 name = "UseAPI.net"
 description = "ComfyUI custom nodes for UseAPI.net — Google Flow, Veo, Runway ML, MiniMax H3/Seedance"
-version = "0.12.0"
+version = "0.13.0"
 license = { text = "MIT" }
 
 [project.urls]

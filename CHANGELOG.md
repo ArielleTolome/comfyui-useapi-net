@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-08-06
+
+### Added
+- **UseapiPixverseUploadFile** — upload image/video/audio for PixVerse ops
+- **UseapiPixverseLipsync** — lip-sync with audio or TTS prompt
+- **UseapiPixverseMotionControl** — character image + motion video
+- **UseapiPixverseExtend** — extend v6 / grok-imagine videos
+
 ## [0.12.0] - 2026-08-06
 
 ### Added
